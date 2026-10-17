@@ -20,7 +20,7 @@ from .normalize import (ABBREVIATIONS, basic, context_window, expansions, icd_co
                         is_negated, laterality)
 import os
 
-from .embed import SAPBERT_SNOMED_TAGS, DenseIndex, SapbertIndex, sapbert_available, word_vectors
+from .embed import SAPBERT_SNOMED_TAGS, DenseIndex, SapbertIndex, sapbert_available, sapbert_tag, word_vectors
 from .rank import DERIVED, Ranker, derive, softmax_by_group
 from .retrieve import DictionaryRetriever, LexicalIndex
 
@@ -35,6 +35,23 @@ _SN_TAGS = ["disorder", "finding", "morphologic abnormality", "situation", "obse
 
 
 # --------------------------------------------------------------------------- dictionary side
+
+CE_K = 15                                                      # candidates the cross-encoder rescores
+CE_WEIGHT = float(os.environ.get("TERMMAP_CE_WEIGHT", "0.3"))  # chosen on the split: 0.3 best for both systems
+LLM_GATE = float(os.environ.get("TERMMAP_LLM_GATE", "0.3"))    # LLM may only pick candidates with prob >= gate x top
+
+
+def ce_enabled() -> bool:
+    """Cross-encoder reranking: TERMMAP_CE=1/0; default on only when a GPU is available (CPU training is slow)."""
+    flag = os.environ.get("TERMMAP_CE", "auto")
+    if flag != "auto":
+        return flag == "1"
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except ImportError:
+        return False
+
 
 def use_sapbert() -> bool:
     """SapBERT retrieval is on when torch/transformers are installed (TERMMAP_SAPBERT=0 disables it)."""
@@ -79,10 +96,11 @@ class CodeSystem:
     def attach_sapbert(self) -> bool:
         """Add the SapBERT index to the retriever (also to a cached CodeSystem built before torch was installed)."""
         r = self.retriever
-        if not use_sapbert() or getattr(r, "sap", None) is not None:
+        name = self.system + sapbert_tag()
+        if not use_sapbert() or getattr(getattr(r, "sap", None), "name", None) == name:
             return False
         keep = [i for i, c in enumerate(r.char.codes) if self.system == config.ICD or self.tag.get(c) in SAPBERT_SNOMED_TAGS]
-        r.sap = SapbertIndex([r.char.texts[i] for i in keep], [r.char.codes[i] for i in keep], name=self.system)
+        r.sap = SapbertIndex([r.char.texts[i] for i in keep], [r.char.codes[i] for i in keep], name=name)
         r._cache.clear()
         return True
 
@@ -368,6 +386,7 @@ class TermMapEngine:
         self.systems = {s: CodeSystem.load(s) for s in config.SYSTEMS}
         self.memory: dict[str, Memory] = {}
         self.ranker: dict[str, Ranker] = {}
+        self.ce: dict = {}
 
     @staticmethod
     def _folds(train: pd.DataFrame, n: int = N_FOLDS) -> np.ndarray:
@@ -388,7 +407,18 @@ class TermMapEngine:
             feats.append(ff)
         return pd.concat(feats, ignore_index=True)
 
-    def fit(self, train: pd.DataFrame, verbose: bool = True) -> "TermMapEngine":
+    def oof_items(self, train: pd.DataFrame, system: str) -> dict[int, tuple[str, str]]:
+        """(entity, chunk_text) for each OOF item id produced by `oof_features`."""
+        folds = self._folds(train)
+        target = (train.coding_system == system) & (train.subconcept == "DiagnosisCode")
+        out = {}
+        for f in range(N_FOLDS):
+            rows = train[target & (folds == f)].reset_index(drop=True)
+            out.update({f * 1_000_000 + i: (e, c) for i, (e, c) in enumerate(zip(rows.entity, rows.chunk_text))})
+        return out
+
+    def fit(self, train: pd.DataFrame, verbose: bool = True, use_ce: bool | None = None) -> "TermMapEngine":
+        use_ce = ce_enabled() if use_ce is None else use_ce
         for system in self.systems:
             X = derive(self.oof_features(train, system))
             if verbose:
@@ -396,26 +426,66 @@ class TermMapEngine:
                 print(f"[{system}] OOF candidate recall: {rec.mean():.3f} ({len(rec)} items, {len(X)} rows)")
             self.ranker[system] = Ranker(FEATURES + DERIVED).fit(X)
             self.memory[system] = Memory(train, system)
+            if use_ce:
+                self.ce[system] = self._train_ce(train, system, X)
         return self
 
+    def _train_ce(self, train, system, X):
+        """Cross-encoder on the ranker's top-k OOF candidates (gold + hard negatives) of the training terms."""
+        from .cross_encoder import CrossEncoder, candidate_text, query_text
+
+        cs, texts = self.systems[system], self.oof_items(train, system)
+        X = X.assign(rk=self.ranker[system].score(X)).sort_values(["item", "rk", "code"], ascending=[True, False, True])
+        groups = []
+        for item, g in X.groupby("item").head(CE_K).groupby("item"):
+            if g.label.max():
+                groups.append((query_text(*texts[item]), [candidate_text(c, cs) for c in g.code],
+                               int(np.argmax(g.label.values))))
+        print(f"[{system}] training cross-encoder on {len(groups)} terms")
+        return CrossEncoder().fit(groups, epochs=2, log_every=0)
+
     def rank(self, items: pd.DataFrame, system: str, use_llm: bool = False,
-             llm_threshold: float = 0.6, llm_k: int = 8) -> pd.DataFrame:
+             llm_threshold: float = 0.8, llm_k: int = 15) -> pd.DataFrame:
+        """Candidates for each term, best first. `prob` is the ranker's confidence (used for routing and
+        reported confidence); `key` is the final order after the cross-encoder blend and LLM adjudication."""
         X = derive(build_features(items, self.systems[system], self.memory[system]))
         if not len(X):
             return X
         X["prob"] = softmax_by_group(X, self.ranker[system].score(X))
         X = X.sort_values(["item", "prob", "code"], ascending=[True, False, True])
-        X["llm"] = 0
+        X["key"], X["llm"] = X.prob, 0
+        if self.ce.get(system) is not None:
+            X = self._ce_rerank(items, X, system)
         if use_llm and llm.enabled():
             X = self._adjudicate(items, X, system, llm_threshold, llm_k)
-        return X
+        return X.sort_values(["item", "key", "code"], ascending=[True, False, True])
+
+    def _ce_rerank(self, items, X, system) -> pd.DataFrame:
+        """Blend ranker and cross-encoder over each term's top-k: (1-w)*z(ranker) + w*z(cross-encoder)."""
+        from .cross_encoder import candidate_text, query_text
+
+        cs = self.systems[system]
+        top = X.groupby("item").head(CE_K).copy()
+        top["ce"] = self.ce[system].score([query_text(items.entity.iloc[i], items.chunk_text.iloc[i]) for i in top.item],
+                                          [candidate_text(c, cs) for c in top.code])
+        top["lp"] = np.log(top.prob.clip(lower=1e-12))
+        g = top.groupby("item")
+        z = lambda c: (top[c] - g[c].transform("mean")) / (g[c].transform("std").fillna(0) + 1e-6)
+        X.loc[top.index, "ce"] = top.ce
+        X.loc[top.index, "key"] = 10 + (1 - CE_WEIGHT) * z("lp") + CE_WEIGHT * z("ce")
+        return X.sort_values(["item", "key", "code"], ascending=[True, False, True])
 
     def _adjudicate(self, items, X, system, threshold, k) -> pd.DataFrame:
-        """Send low-confidence terms with their top-k candidates to the LLM; its pick moves to the top."""
+        """Send low-confidence terms with their top-k candidates to the LLM. Its pick goes to the top only
+        when the ranker also found it plausible (pick prob >= LLM_GATE x top prob): the LLM settles close
+        calls but does not overrule a clear ranker decision (measured: unrestricted overrides hurt)."""
         cs = self.systems[system]
+        if "key" not in X.columns:
+            X = X.assign(key=X.prob, llm=0)
+        X = X.sort_values(["item", "key", "code"], ascending=[True, False, True])
         top = X.groupby("item").head(k)
-        low = top.groupby("item").prob.max()
-        low = low[low < threshold].index.tolist()
+        conf = X.groupby("item").prob.max()
+        low = conf[conf < threshold].index.tolist()
         tasks = []
         for i in low:
             g = top[top.item == i]
@@ -428,11 +498,13 @@ class TermMapEngine:
         picks = llm.adjudicate(tasks)
         X.attrs["llm_picks"] = dict(zip(low, picks))
         for i, code in zip(low, picks):
-            if code:
-                m = (X.item == i) & (X.code == code)
-                X.loc[m, "prob"] = X.loc[m, "prob"] + 1.0
+            if not code:
+                continue
+            m = (X.item == i) & (X.code == code)
+            if m.any() and X.loc[m, "prob"].iloc[0] >= LLM_GATE * conf[i]:
+                X.loc[m, "key"] = 1e6
                 X.loc[m, "llm"] = 1
-        return X.sort_values(["item", "prob", "code"], ascending=[True, False, True])
+        return X.sort_values(["item", "key", "code"], ascending=[True, False, True])
 
     def predict(self, items: pd.DataFrame, top_n: int = 5, use_llm: bool | None = None) -> pd.DataFrame:
         use_llm = llm.enabled() if use_llm is None else use_llm
@@ -464,11 +536,17 @@ class TermMapEngine:
 
     def save(self, path=None):
         path = path or config.CACHE_DIR / "engine.joblib"
-        joblib.dump({"memory": self.memory, "ranker": self.ranker}, path)
+        joblib.dump({"memory": self.memory, "ranker": self.ranker, "ce_systems": sorted(self.ce)}, path)
+        for system, ce in self.ce.items():
+            ce.save(config.CACHE_DIR / f"engine_ce_{system}")
 
     @classmethod
     def load(cls, path=None) -> "TermMapEngine":
+        from .cross_encoder import CrossEncoder
+
         eng = cls()
         state = joblib.load(path or config.CACHE_DIR / "engine.joblib")
         eng.memory, eng.ranker = state["memory"], state["ranker"]
+        for system in state.get("ce_systems", []):
+            eng.ce[system] = CrossEncoder(str(config.CACHE_DIR / f"engine_ce_{system}"))
         return eng

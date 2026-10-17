@@ -14,6 +14,10 @@ All numbers are exact-match accuracy on held-out data. "Split" is the fixed 20% 
 | 7 | + polarity-conflict / drift-parent features, coronary abbreviations (no SapBERT, vs #5) | split | 0.544 | 0.533 | 0.900 | 0.867 | 0.287 | 0.383 | cloud CPU |
 | 7 | same as #7, with SapBERT | CV5 | 0.647 | 0.575 | 0.933 | 0.921 | 0.429 | 0.447 | A6000 |
 | L2 | Qwen2.5-14B-AWQ (local vLLM) on conf < 0.8, top-15, batch 10 (on #7) | split | 0.625 → 0.567 | 0.581 → 0.540 | | | | | A6000 |
+| L3 | Qwen-14B, batch 10, routing "override only if LLM pick prob ≥ 0.3 × top" (best policy; chosen on split) | split | 0.625 → 0.661 | 0.581 → 0.600 | | | | | A6000 |
+| L4 | same, 1 term per request | split | 0.625 → 0.653 | 0.581 → 0.589 | | | | | A6000 |
+| C1 | cross-encoder (SapBERT init, listwise, top-15, 2 epochs); alone / blend w=0.3 | split | 0.480 / **0.655** | 0.499 / **0.607** | gold@15 0.898 | gold@15 0.837 | | | A6000 |
+| R1 | SapBERT fine-tuned on train-side pairs + 15k synonym pairs/system: retrieval only, acc@1 / r@15 | split | 0.369→0.429 / 0.689→0.821 | 0.460→0.510 / 0.724→0.788 | | | unseen r@15 0.673→0.772 | unseen r@15 0.653→0.723 | A6000 |
 | L1 | Gemini 2.5 Flash on conf < 0.6, top-8 (on #5, first 200 split terms) | split-200 | 0.520 → 0.610 | 0.545 → 0.655 | | | | | cloud |
 
 CV5 run #6 extra diagnostics:
@@ -26,3 +30,7 @@ Notes on #7: an ablation on the same features moved ICD −0.9 / SNOMED +0.9 poi
 #7 CV5 verdict: no gain over #6 (ICD 0.6473 → 0.6469, SNOMED 0.5804 → 0.5752). The polarity features were removed. The retrieval-side additions (coronary abbreviations, drift-parent candidates) were kept because they're recall-neutral-to-positive.
 
 L2: the local 14B LLM overriding all terms under 0.8 confidence hurt by 4–6 points. It replaced many ranker picks that were already right (terms with confidence 0.5–0.8 are 50–80% correct). Next: route by measured per-confidence-bucket accuracy (`ranker_lab llm` now prints this, plus policy comparisons), try 1 term per request (`TERMMAP_LLM_BATCH=1`), and try the 32B model.
+
+LLM notes: Qwen-14B is less accurate than the ranker on the terms it sees (0.36 vs 0.45), so it only helps as a tie-breaker between the ranker's plausible candidates. Batching 10 terms per request was better than 1.
+Cross-encoder notes: it's weaker alone but complementary; blending at 0.3 helped both systems.
+Both of these settings were chosen on the same split, so the CV5 run is the real test.

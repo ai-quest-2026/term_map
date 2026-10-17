@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import glob
 import json
+import os
 import math
 from collections import Counter
 from functools import lru_cache
@@ -136,6 +137,17 @@ class DenseIndex:
 # --------------------------------------------------------------------------- SapBERT (optional)
 
 SAPBERT_MODEL = "cambridgeltl/SapBERT-from-PubMedBERT-fulltext"  # Apache-2.0
+
+
+def sapbert_model() -> str:
+    """Encoder in use: TERMMAP_SAPBERT_MODEL (e.g. a fine-tuned copy in data/cache/) or the public SapBERT."""
+    return os.environ.get("TERMMAP_SAPBERT_MODEL", "").strip() or SAPBERT_MODEL
+
+
+def sapbert_tag() -> str:
+    """Suffix for cached dictionary vectors, so each encoder gets its own cache."""
+    m = sapbert_model()
+    return "" if m == SAPBERT_MODEL else "_" + os.path.basename(os.path.normpath(m))
 # SNOMED tags covering ~95% of the gold diagnosis concepts; the rest stay lexical-only to save encode time.
 SAPBERT_SNOMED_TAGS = {"disorder", "finding", "morphologic abnormality", "situation", "observable entity", "event"}
 
@@ -150,7 +162,8 @@ def sapbert_available() -> bool:
 
 
 class SapbertEncoder:
-    def __init__(self, model: str = SAPBERT_MODEL, max_length: int = 32):
+    def __init__(self, model: str | None = None, max_length: int = 32):
+        model = model or sapbert_model()
         import torch
         from transformers import AutoModel, AutoTokenizer
 

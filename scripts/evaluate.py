@@ -27,7 +27,8 @@ def split(train: pd.DataFrame, frac: float) -> np.ndarray:
 
 def evaluate_fold(tr: pd.DataFrame, va: pd.DataFrame, args) -> pd.DataFrame:
     t0 = time.time()
-    eng = TermMapEngine().fit(tr)
+    use_ce = {"on": True, "off": False}.get(args.ce)  # None -> auto (on when a GPU is available)
+    eng = TermMapEngine().fit(tr, use_ce=use_ce)
     print(f"fit: {time.time() - t0:.1f}s")
     diag_tr = tr[tr.subconcept == "DiagnosisCode"]
     diag_va = va[va.subconcept == "DiagnosisCode"]
@@ -73,6 +74,8 @@ def main():
     ap.add_argument("--llm", action="store_true", help="adjudicate low-confidence terms with the LLM in .env")
     ap.add_argument("--llm-threshold", type=float, default=0.8)
     ap.add_argument("--llm-k", type=int, default=15)
+    ap.add_argument("--ce", choices=["auto", "on", "off"], default="auto",
+                    help="cross-encoder reranking (auto = on when a GPU is available)")
     ap.add_argument("--out", default=str(config.ROOT / "reports" / "val_predictions.csv"))
     args = ap.parse_args()
 
