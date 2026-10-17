@@ -14,12 +14,12 @@ import joblib
 import numpy as np
 import pandas as pd
 from rapidfuzz import fuzz
-from sklearn.ensemble import HistGradientBoostingClassifier
 
-from . import config, data
+from . import config, data, llm
 from .normalize import (ABBREVIATIONS, basic, context_window, expansions, icd_codes_in_text, is_history,
                         is_negated, laterality)
 from .embed import DenseIndex, word_vectors
+from .rank import DERIVED, Ranker, derive, softmax_by_group
 from .retrieve import DictionaryRetriever, LexicalIndex
 
 K_DICT = 30
@@ -84,9 +84,14 @@ class Memory:
     """What the training labels teach: aliases (entity strings and gold displays) -> code, code priors."""
 
     def __init__(self, rows: pd.DataFrame, system: str):
+        other = rows[(rows.coding_system != system) & (rows.subconcept == "DiagnosisCode")]
         rows = rows[rows.coding_system == system]
-        texts = [basic(t) for t in rows.entity] + [basic(t) for t in rows.display]
-        codes = list(rows.code) + list(rows.code)
+        # The other system's gold display for the same mention is one more way coders worded it.
+        paired = rows.merge(other[["entity", "chunk_text", "display"]], on=["entity", "chunk_text"],
+                            suffixes=("", "_other"))
+        texts = ([basic(t) for t in rows.entity] + [basic(t) for t in rows.display]
+                 + [basic(t) for t in paired.display_other])
+        codes = list(rows.code) + list(rows.code) + list(paired.code)
         self.exact: dict[str, Counter] = defaultdict(Counter)
         for t, c in zip(texts, codes):
             self.exact[t][c] += 1
@@ -96,6 +101,18 @@ class Memory:
         self.freq = Counter(diag.code)
         self.cat_freq = Counter(c[:3] for c in diag.code) if system == config.ICD else Counter()
         self.n = max(len(diag), 1)
+        self.diag_codes = Counter(diag.code)
+        self._unspec_rate: dict[str, float] | None = None
+
+    def unspec_rate(self, cs: "CodeSystem") -> dict[str, float]:
+        """Per ICD category: share of training golds that are an 'unspecified' code (coder convention)."""
+        if self._unspec_rate is None:
+            tot, uns = Counter(), Counter()
+            for code, n in self.diag_codes.items():
+                tot[code[:3]] += n
+                uns[code[:3]] += n * (code in cs.unspecified)
+            self._unspec_rate = {c: uns[c] / tot[c] for c in tot}
+        return self._unspec_rate
 
     def search(self, queries: list[str], k: int = K_MEM):
         if self.index is None:
@@ -110,7 +127,8 @@ FEATURES = [
     "from_expansion", "code_in_text", "hier", "freq", "cat_freq", "is_leaf", "unspec", "code_len", "n_desc",
     "jacc", "q_cov", "d_cov", "tsr", "ratio", "lat_match", "lat_extra", "lat_missing", "ctx_overlap",
     "q_neg", "d_neg", "q_hist", "d_hist", "q_ntok", "q_abbrev", "rank_in_group", "score_gap",
-    "d_dense", "d_dense_rank", "m_dense", "soft_q", "soft_d", "ctx_dense",
+    "d_dense", "d_dense_rank", "m_dense", "soft_q", "soft_d", "ctx_dense", "head_match", "cat_unspec_rate",
+    "neg_query",
 ] + [f"tag_{t}" for t in _SN_TAGS]
 
 
@@ -129,6 +147,7 @@ class Cand:
     d_dense: float = 0.0
     d_dense_rank: int = 99
     m_dense: float = 0.0
+    neg_query: int = 0
     from_expansion: int = 1
     code_in_text: int = 0
     hier: int = 0
@@ -146,6 +165,11 @@ def _gather(entity: str, chunk: str, cs: CodeSystem, mem: Memory, dict_hits, mem
 
     for qi, (q, (ch, wd, de), (mh, mdh)) in enumerate(zip(queries, dict_hits, mem_hits)):
         orig = int(qi > 0)
+        negq = int(q.startswith("no ") or q.endswith(" absent"))
+        for h in ch[:10] if negq else ():
+            get(h.code).neg_query = 1
+        for h in de[:10] if negq else ():
+            get(h.code).neg_query = 1
         for h in ch:
             c = get(h.code)
             if h.score > c.d_char:
@@ -189,11 +213,17 @@ def _gather(entity: str, chunk: str, cs: CodeSystem, mem: Memory, dict_hits, mem
         for code in icd_codes_in_text(entity):
             if code in cs.valid:
                 get(code).code_in_text = 1
-        # Specificity calibration: offer the "unspecified" leaves of the top categories.
-        top = sorted(cands.values(), key=lambda c: -(c.d_char + c.m_char))[:5]
+        # Specificity calibration: offer the "unspecified" leaves of the top categories, and the
+        # initial-encounter (7th character A) variant of injury codes retrieved as D/S encounters.
+        top = sorted(cands.values(), key=lambda c: -(c.d_char + c.m_char + c.d_dense))[:5]
         for c in top:
             for sib in cs.unspec_by_cat.get(c.code[:3], [])[:4]:
                 get(sib).hier = 1
+        for code in list(cands):
+            if code[0] in "ST" and len(code) == 8 and code[-1] in "DS":
+                a = code[:-1] + "A"
+                if a in cs.valid:
+                    get(a).hier = 1
     for c in cands.values():
         if not c.text:
             c.text = basic(cs.pref.get(c.code, ""))
@@ -215,6 +245,8 @@ def _featurize(entity: str, chunk: str, cands: dict[str, Cand], cs: CodeSystem, 
     clist = list(cands.values())
     ctx_vec = wv.embed([" ".join(sorted(ctx))])[0]
     ctx_sim = wv.embed([c.text for c in clist]) @ ctx_vec if clist else []
+    head = qn.split()[-1] if qn else ""
+    unspec_rate = mem.unspec_rate(cs) if cs.system == config.ICD else {}
     rows = []
     for ci, c in enumerate(clist):
         dt = set(c.text.split())
@@ -243,6 +275,9 @@ def _featurize(entity: str, chunk: str, cands: dict[str, Cand], cs: CodeSystem, 
             "soft_q": max(wv.soft_coverage(e, dl) for e in exp_toks),
             "soft_d": max(wv.soft_coverage(dl, e) for e in exp_toks),
             "ctx_dense": float(ctx_sim[ci]),
+            "head_match": int(head in dt),
+            "cat_unspec_rate": unspec_rate.get(c.code[:3], -1.0),
+            "neg_query": c.neg_query,
             **{f"tag_{t}": int(tag == t) for t in _SN_TAGS},
         })
     df = pd.DataFrame(rows)
@@ -255,7 +290,10 @@ def _featurize(entity: str, chunk: str, cands: dict[str, Cand], cs: CodeSystem, 
 
 def build_features(items: pd.DataFrame, cs: CodeSystem, mem: Memory) -> pd.DataFrame:
     """items: DataFrame with entity, chunk_text (and optional gold `code`). Returns one row per candidate."""
-    queries = [expansions(e) for e in items.entity]
+    # Negated mentions also query the negative concept ("no nausea", "nausea absent"); SNOMED encodes
+    # some negations as their own concepts, the ranker decides with the q_neg/d_neg features.
+    queries = [expansions(e) + ([f"no {basic(e)}", f"{basic(e)} absent"] if is_negated(e, c) else [])
+               for e, c in zip(items.entity, items.chunk_text)]
     flat = sorted({q for qs in queries for q in qs})
     dres = dict(zip(flat, cs.retriever.search(flat, K_DICT)))
     mres = dict(zip(flat, mem.search(flat, K_MEM)))
@@ -278,7 +316,7 @@ class TermMapEngine:
     def __init__(self):
         self.systems = {s: CodeSystem.load(s) for s in config.SYSTEMS}
         self.memory: dict[str, Memory] = {}
-        self.ranker: dict[str, HistGradientBoostingClassifier] = {}
+        self.ranker: dict[str, Ranker] = {}
 
     @staticmethod
     def _folds(train: pd.DataFrame, n: int = N_FOLDS) -> np.ndarray:
@@ -286,43 +324,69 @@ class TermMapEngine:
         return train.chunk_text.astype(str).map(
             lambda t: int(hashlib.md5(t.encode()).hexdigest(), 16) % n).to_numpy()
 
-    def fit(self, train: pd.DataFrame, verbose: bool = True) -> "TermMapEngine":
+    def oof_features(self, train: pd.DataFrame, system: str) -> pd.DataFrame:
+        """Candidate features for every training diagnosis row, with the training memory built from the
+        other folds only, so the ranker learns how memory behaves on unseen terms."""
         folds = self._folds(train)
-        for system, cs in self.systems.items():
-            target = (train.coding_system == system) & (train.subconcept == "DiagnosisCode")
-            feats = []
-            for f in range(N_FOLDS):
-                mem = Memory(train[folds != f], system)
-                items = train[target & (folds == f)].reset_index(drop=True)
-                ff = build_features(items, cs, mem)
-                ff["item"] += f * 1_000_000
-                feats.append(ff)
-            X = pd.concat(feats, ignore_index=True)
-            groups_with_gold = X.groupby("item").label.max()
+        target = (train.coding_system == system) & (train.subconcept == "DiagnosisCode")
+        feats = []
+        for f in range(N_FOLDS):
+            items = train[target & (folds == f)].reset_index(drop=True)
+            ff = build_features(items, self.systems[system], Memory(train[folds != f], system))
+            ff["item"] += f * 1_000_000
+            feats.append(ff)
+        return pd.concat(feats, ignore_index=True)
+
+    def fit(self, train: pd.DataFrame, verbose: bool = True) -> "TermMapEngine":
+        for system in self.systems:
+            X = derive(self.oof_features(train, system))
             if verbose:
-                print(f"[{system}] OOF candidate recall: {groups_with_gold.mean():.3f} "
-                      f"({len(groups_with_gold)} items, {len(X)} candidate rows)")
-            model = HistGradientBoostingClassifier(max_iter=400, learning_rate=0.05, max_leaf_nodes=31,
-                                                   l2_regularization=1.0, early_stopping=False,
-                                                   random_state=config.SEED)
-            model.fit(X[FEATURES], X.label)
-            self.ranker[system] = model
+                rec = X.groupby("item").label.max()
+                print(f"[{system}] OOF candidate recall: {rec.mean():.3f} ({len(rec)} items, {len(X)} rows)")
+            self.ranker[system] = Ranker(FEATURES + DERIVED).fit(X)
             self.memory[system] = Memory(train, system)
         return self
 
-    def rank(self, items: pd.DataFrame, system: str) -> pd.DataFrame:
-        X = build_features(items, self.systems[system], self.memory[system])
+    def rank(self, items: pd.DataFrame, system: str, use_llm: bool = False,
+             llm_threshold: float = 0.6, llm_k: int = 8) -> pd.DataFrame:
+        X = derive(build_features(items, self.systems[system], self.memory[system]))
         if not len(X):
             return X
-        X["prob"] = self.ranker[system].predict_proba(X[FEATURES])[:, 1]
+        X["prob"] = softmax_by_group(X, self.ranker[system].score(X))
+        X = X.sort_values(["item", "prob", "code"], ascending=[True, False, True])
+        X["llm"] = 0
+        if use_llm and llm.enabled():
+            X = self._adjudicate(items, X, system, llm_threshold, llm_k)
+        return X
+
+    def _adjudicate(self, items, X, system, threshold, k) -> pd.DataFrame:
+        """Send low-confidence terms with their top-k candidates to the LLM; its pick moves to the top."""
+        cs = self.systems[system]
+        top = X.groupby("item").head(k)
+        low = top.groupby("item").prob.max()
+        low = low[low < threshold].index.tolist()
+        tasks = []
+        for i in low:
+            g = top[top.item == i]
+            cands = [(c, cs.pref.get(c, "") + (f" ({cs.tag[c]})" if cs.tag.get(c) else "")) for c in g.code]
+            tasks.append({"entity": items.entity.iloc[i], "system": system,
+                          "context": context_window(items.entity.iloc[i], items.chunk_text.iloc[i], 150),
+                          "candidates": cands})
+        picks = llm.adjudicate(tasks)
+        for i, code in zip(low, picks):
+            if code:
+                m = (X.item == i) & (X.code == code)
+                X.loc[m, "prob"] = X.loc[m, "prob"] + 1.0
+                X.loc[m, "llm"] = 1
         return X.sort_values(["item", "prob", "code"], ascending=[True, False, True])
 
-    def predict(self, items: pd.DataFrame, top_n: int = 5) -> pd.DataFrame:
+    def predict(self, items: pd.DataFrame, top_n: int = 5, use_llm: bool | None = None) -> pd.DataFrame:
+        use_llm = llm.enabled() if use_llm is None else use_llm
         items = items.reset_index(drop=True)
         out = items[[c for c in items.columns if c in ("chunk_id", "entity", "clinical_entity", "chunk_text")]].copy()
         for system in config.SYSTEMS:
             col = "icd10cm" if system == config.ICD else "snomed"
-            R = self.rank(items, system)
+            R = self.rank(items, system, use_llm=use_llm)
             pref = self.systems[system].pref
             best, conf, margin, alts = [], [], [], []
             groups = dict(tuple(R.groupby("item"))) if len(R) else {}

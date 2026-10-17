@@ -28,6 +28,8 @@ def split(train: pd.DataFrame, frac: float) -> np.ndarray:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--val-frac", type=float, default=0.2)
+    ap.add_argument("--llm", action="store_true", help="adjudicate low-confidence terms with the LLM in .env")
+    ap.add_argument("--llm-threshold", type=float, default=0.6)
     ap.add_argument("--out", default=str(config.ROOT / "reports" / "val_predictions.csv"))
     args = ap.parse_args()
 
@@ -44,7 +46,7 @@ def main():
     for system in config.SYSTEMS:
         items = diag_va[diag_va.coding_system == system].reset_index(drop=True)
         t0 = time.time()
-        R = eng.rank(items, system)
+        R = eng.rank(items, system, use_llm=args.llm, llm_threshold=args.llm_threshold)
         dt = (time.time() - t0) / max(len(items), 1)
         top = R.groupby("item").head(1).set_index("item")
         pred = items.index.map(lambda i: top.code.get(i, ""))
