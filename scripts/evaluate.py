@@ -1,6 +1,6 @@
 """Grouped hold-out evaluation on the labelled training file.
 
-    python -m scripts.evaluate [--val-frac 0.2]
+    python -m scripts.evaluate [--val-frac 0.2 | --cv 5] [--no-context] [--ce auto|on|off] [--llm]
 
 Splits DiagnosisCode rows by chunk (no chunk appears on both sides), fits the engine on the train
 side and reports, per coding system: exact-match accuracy, candidate recall, accuracy on codes seen /
@@ -35,6 +35,8 @@ def evaluate_fold(tr: pd.DataFrame, va: pd.DataFrame, args) -> pd.DataFrame:
     results = []
     for system in config.SYSTEMS:
         items = diag_va[diag_va.coding_system == system].reset_index(drop=True)
+        if args.no_context:  # the PS eval schema is chunk_id + clinical_entity: maybe no chunk text at all
+            items = items.assign(chunk_text="")
         t0 = time.time()
         R = eng.rank(items, system, use_llm=args.llm, llm_threshold=args.llm_threshold, llm_k=args.llm_k)
         top = R.groupby("item").head(1).set_index("item")
@@ -76,6 +78,8 @@ def main():
     ap.add_argument("--llm-k", type=int, default=15)
     ap.add_argument("--ce", choices=["auto", "on", "off"], default="auto",
                     help="cross-encoder reranking (auto = on when a GPU is available)")
+    ap.add_argument("--no-context", action="store_true",
+                    help="blank chunk_text for the evaluated terms (training keeps it): robustness to an eval file without context")
     ap.add_argument("--out", default=str(config.ROOT / "reports" / "val_predictions.csv"))
     args = ap.parse_args()
 
@@ -92,6 +96,8 @@ def main():
         is_val = split(train, args.val_frac)
         df = evaluate_fold(train[~is_val], train[is_val], args)
     report(df)
+    if args.no_context and args.out == ap.get_default("out"):
+        args.out = args.out.replace(".csv", "_nocontext.csv")
     df.drop(columns=["chunk_text"]).to_csv(args.out, index=False)
     print(f"wrote {args.out}")
 
