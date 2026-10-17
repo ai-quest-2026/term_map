@@ -9,5 +9,5 @@ joblib>=1.3
 fastapi>=0.110
 uvicorn>=0.29
 requests>=2.31
-lightgbm
+lightgbm>=4.3
 spacy>=3.7  # one-time conversion of scispacy vectors
