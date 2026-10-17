@@ -426,6 +426,7 @@ class TermMapEngine:
                           "context": context_window(items.entity.iloc[i], items.chunk_text.iloc[i], 150),
                           "candidates": cands})
         picks = llm.adjudicate(tasks)
+        X.attrs["llm_picks"] = dict(zip(low, picks))
         for i, code in zip(low, picks):
             if code:
                 m = (X.item == i) & (X.code == code)

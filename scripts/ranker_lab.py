@@ -66,7 +66,9 @@ def run(variants: dict[str, dict] | None = None):
 
 
 def run_llm(threshold: float = 0.8, max_terms: int = 200, k: int = 15):
-    """Accuracy before/after LLM adjudication of low-confidence val terms (first `max_terms` per system)."""
+    """LLM adjudication on the val split: where does it help, where does it hurt, and which routing
+    policy is best. LLM answers are cached, so re-running with other policies costs no new calls.
+    Policies are compared on the same val terms, so the best one is slightly optimistic."""
     if not llm.enabled():
         raise SystemExit("set LLM_PROVIDER and its key in .env first")
     train = data.load_train()
@@ -79,12 +81,38 @@ def run_llm(threshold: float = 0.8, max_terms: int = 200, k: int = 15):
             _path("train", system)))).score(Xva))
         Xva = Xva.sort_values(["item", "prob", "code"], ascending=[True, False, True])
         Xva = Xva[Xva.item < max_terms]
-        before = Xva.groupby("item").head(1).label.sum()
-        after_X = eng._adjudicate(items, Xva.copy(), system, threshold, k)
-        after = after_X.groupby("item").head(1).label.sum()
+        Xva["rank"] = Xva.groupby("item").cumcount()
+        picks = eng._adjudicate(items, Xva.copy(), system, threshold, k).attrs["llm_picks"]
+        top = Xva.groupby("item").head(1).set_index("item")
+        gold = Xva[Xva.label == 1].set_index("item").code
+        rank_of = {(i, c): r for i, c, r in zip(Xva.item, Xva.code, Xva["rank"])}
+        prob_of = {(i, c): p for i, c, p in zip(Xva.item, Xva.code, Xva.prob)}
         n = Xva.item.nunique()
-        sent = (Xva.groupby("item").prob.max() < threshold).sum()
-        print(f"[{system}] n={n} sent_to_llm={sent} before={before / n:.4f} after={after / n:.4f}")
+        rows = []
+        for i in top.index:
+            pick = picks.get(i)
+            rows.append({"item": i, "conf": top.prob[i], "ranker_ok": top.code[i] == gold.get(i),
+                         "sent": i in picks, "pick": pick, "llm_ok": pick is not None and pick == gold.get(i),
+                         "pick_rank": rank_of.get((i, pick), 99), "pick_prob": prob_of.get((i, pick), 0.0),
+                         "gold_in_k": rank_of.get((i, gold.get(i)), 99) < k})
+        R = pd.DataFrame(rows)
+        S = R[R.sent]
+        print(f"[{system}] n={n} sent={len(S)} answered={S.pick.notna().sum()} gold in top-{k} of sent={S.gold_in_k.mean():.3f}")
+        print(f"  on sent terms: ranker acc {S.ranker_ok.mean():.3f}  LLM acc {S.llm_ok.mean():.3f}  "
+              f"agree {(S.pick == top.code.reindex(S.item).values).mean():.3f}")
+        buckets = pd.cut(S.conf, [0, 0.3, 0.5, 0.65, 0.8, 1.01], right=False)
+        print("  by ranker confidence (sent terms):")
+        print(S.groupby(buckets, observed=True)[["ranker_ok", "llm_ok"]].agg(["size", "mean"]).iloc[:, [0, 1, 3]]
+              .set_axis(["n", "ranker_acc", "llm_acc"], axis=1).round(3).to_string().replace("\n", "\n    "))
+        policies = {"ranker only": lambda r: False, "override all sent": lambda r: True}
+        for t in (0.3, 0.4, 0.5, 0.6, 0.7):
+            policies[f"override if conf < {t}"] = (lambda t: lambda r: r.conf < t)(t)
+        policies["override if pick in ranker top-3"] = lambda r: r.pick_rank < 3
+        policies["override if pick prob >= 0.3 x top"] = lambda r: r.pick_prob >= 0.3 * r.conf
+        print("  routing policy -> accuracy:")
+        for name, use in policies.items():
+            ok = [(r.llm_ok if (r.sent and r.pick is not None and use(r)) else r.ranker_ok) for r in R.itertuples()]
+            print(f"    {name:36s} {sum(ok) / n:.4f}")
 
 
 def _items(train: pd.DataFrame, system: str):

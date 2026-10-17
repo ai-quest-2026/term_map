@@ -96,8 +96,10 @@ def _parse(text: str) -> dict[int, int]:
         return {}
 
 
-def adjudicate(tasks: list[dict], batch: int = 10) -> list[str | None]:
-    """tasks: {entity, context, system, candidates: [(code, description), ...]} -> chosen code (or None)."""
+def adjudicate(tasks: list[dict], batch: int | None = None) -> list[str | None]:
+    """tasks: {entity, context, system, candidates: [(code, description), ...]} -> chosen code (or None).
+    Terms per request: TERMMAP_LLM_BATCH (default 10; smaller models do better with fewer)."""
+    batch = batch or int(os.environ.get("TERMMAP_LLM_BATCH", "10"))
     out: list[str | None] = [None] * len(tasks)
     for s in range(0, len(tasks), batch):
         chunk = tasks[s:s + batch]
