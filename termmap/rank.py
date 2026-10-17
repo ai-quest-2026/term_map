@@ -1,6 +1,8 @@
 """Learning-to-rank over candidate features: group-relative feature derivation and the ranker itself."""
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pandas as pd
 
@@ -44,7 +46,8 @@ class Ranker:
         self.features = features
         defaults = dict(objective="lambdarank", n_estimators=600, learning_rate=0.03, num_leaves=31,
                         min_child_samples=20, colsample_bytree=0.8, subsample=1.0, reg_lambda=1.0,
-                        lambdarank_truncation_level=10, random_state=config.SEED, n_jobs=4,
+                        lambdarank_truncation_level=10, random_state=config.SEED,
+                        n_jobs=int(os.environ.get("TERMMAP_JOBS", "4")),
                         deterministic=True, force_row_wise=True, verbose=-1)
         defaults.update(params)
         self.model = lgb.LGBMRanker(**defaults)
