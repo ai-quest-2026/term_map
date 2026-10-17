@@ -3,7 +3,8 @@
     python -m scripts.ranker_lab dump      # build raw features for the grouped split (slow, once per retrieval change)
     python -m scripts.ranker_lab run       # train/score ranker variants on the cache (seconds)
     python -m scripts.ranker_lab llm [threshold] [max_terms] [k]   # LLM adjudication gain on the val split
-    python -m scripts.ranker_lab ce [k] [epochs]   # train a cross-encoder reranker on the train side, test on val
+    python -m scripts.ranker_lab ce [k] [epochs] [syn]   # cross-encoder reranker (+ syn synonym groups/system)
+    python -m scripts.ranker_lab joint [k]         # joint ICD+SNOMED decoding (weights tuned on train side only)
 """
 from __future__ import annotations
 
@@ -132,9 +133,42 @@ def _items(train: pd.DataFrame, system: str):
     return tr_items, {i: (r.entity, r.chunk_text) for i, r in va_rows.iterrows()}
 
 
-def run_ce(k: int = 15, epochs: int = 2):
-    """Cross-encoder over the ranker's top-k: trained on the train side's OOF candidates, tested on val.
-    Reports ranker alone, cross-encoder alone and z-score blends of the two."""
+def synonym_groups(cs, n: int, k: int = 15) -> list[tuple[str, list[str], int]]:
+    """Distant supervision for the cross-encoder: open-ontology / CDC synonyms ("hyperpiesia" -> I10) as
+    queries, our own dictionary search results as candidates, the synonym's code as the answer.
+    No labelled terms are used, so this adds no leakage."""
+    import random
+
+    from termmap.cross_encoder import candidate_text
+    from termmap.normalize import basic
+
+    rng = random.Random(config.SEED)
+    al = []
+    for f in sorted(config.EXTERNAL_DIR.glob(f"{cs.system}_aliases*.parquet")):
+        a = pd.read_parquet(f)
+        al += [(basic(t), c) for t, c in zip(a.description, a.code)
+               if c in cs.pref and basic(t) and basic(t) != basic(cs.pref[c])]
+    al = sorted(set(al))
+    rng.shuffle(al)
+    al = al[:n]
+    res = cs.retriever.search([t for t, _ in al], 30)
+    groups = []
+    for (t, code), (ch, wd, de, sp) in zip(al, res):
+        cands = []
+        for h in (sp or []) + ch + wd:  # SapBERT hits first: the hardest negatives
+            if h.code not in cands:
+                cands.append(h.code)
+        cands = cands[:k]
+        if code not in cands:
+            cands[-1:] = [code]
+        cands = sorted(cands, key=lambda c: rng.random())  # gold position must not leak
+        groups.append((f"{t} ; ", [candidate_text(c, cs) for c in cands], cands.index(code)))
+    return groups
+
+
+def run_ce(k: int = 15, epochs: int = 2, syn: int = 0):
+    """Cross-encoder over the ranker's top-k: trained on the train side's OOF candidates (+ optional
+    synonym groups), tested on val. Reports ranker alone, cross-encoder alone and z-score blends."""
     from termmap.cross_encoder import CrossEncoder, candidate_text, query_text
     from termmap.engine import CodeSystem
 
@@ -157,7 +191,11 @@ def run_ce(k: int = 15, epochs: int = 2):
                 continue
             ent, chunk = tr_items[item]
             groups.append((query_text(ent, chunk), [candidate_text(c, cs) for c in g.code], int(np.argmax(g.label.values))))
-        print(f"[{system}] training cross-encoder on {len(groups)} terms x {k} candidates")
+        if syn:
+            extra = synonym_groups(cs, syn, k)
+            print(f"[{system}] + {len(extra)} synonym groups")
+            groups = groups + extra
+        print(f"[{system}] training cross-encoder on {len(groups)} groups x {k} candidates")
         ce = CrossEncoder().fit(groups, epochs=epochs)
         ce.save(config.CACHE_DIR / f"ce_{system}")
         V = tops["val"].copy()
@@ -173,10 +211,96 @@ def run_ce(k: int = 15, epochs: int = 2):
             print(f"  {name:16s} acc={hit / n:.4f}")
 
 
+def _topk_logp(X: pd.DataFrame, scores, k: int) -> dict:
+    X = X.assign(p=softmax_by_group(X, scores)).sort_values(["item", "p", "code"], ascending=[True, False, True])
+    gold = X[X.label == 1].groupby("item").code.first()
+    X = X.groupby("item").head(k)
+    return {i: (list(g.code), np.log(g.p.clip(lower=1e-9)).to_numpy(), gold.get(i))
+            for i, g in X.groupby("item")}
+
+
+def run_joint(k: int = 10):
+    """Joint decoding of the two systems for mentions that need both codes:
+        score(icd, snomed) = log p(icd) + log p(snomed) + a*log1p(n_train(snomed, icd))
+                             + b*log1p(n_train(snomed, icd category)) + c*[open crosswalk link]
+    Weights are tuned on the train side (5-fold OOF ranker probabilities, leave-one-out pair counts)
+    and then applied unchanged to the held-out split."""
+    from collections import Counter
+    from itertools import product
+
+    from termmap.terminology import table
+
+    train = data.load_train()
+    is_val = split(train, 0.2)
+    tr = train[~is_val]
+    xwalk = set(zip(table("crosswalk").snomed_code, table("crosswalk").icd10cm_code))
+    diag = tr[tr.subconcept == "DiagnosisCode"]
+    pairs = diag.pivot_table(index=["entity", "chunk_text"], columns="coding_system", values="code",
+                             aggfunc="first").dropna()
+    n_pair = Counter(zip(pairs[config.SNOMED], pairs[config.ICD]))
+    n_cat = Counter(zip(pairs[config.SNOMED], pairs[config.ICD].str[:3]))
+
+    side = {}
+    for system in config.SYSTEMS:
+        tr_items, va_items = _items(train, system)
+        Xtr = derive(pd.read_parquet(_path("train", system)))
+        Xva = derive(pd.read_parquet(_path("val", system)))
+        oof = pd.Series(0.0, index=Xtr.index)
+        fold = Xtr.item // 1_000_000
+        for f in sorted(fold.unique()):  # OOF ranker scores on the train side (honest tuning)
+            m = fold == f
+            oof[m] = Ranker(FEATURES + DERIVED).fit(Xtr[~m]).score(Xtr[m])
+        side[system] = {
+            "train": (_topk_logp(Xtr, oof.to_numpy(), k), tr_items),
+            "val": (_topk_logp(Xva, Ranker(FEATURES + DERIVED).fit(Xtr).score(Xva), k), va_items)}
+
+    def mentions(part):
+        ti, tk = side[config.ICD][part]
+        si, sk = side[config.SNOMED][part]
+        by_key = {tk[i]: i for i in ti}
+        return [(by_key[sk[j]], j) for j in si if sk[j] in by_key], ti, si
+
+    def accuracy(part, a, b, c, loo):
+        paired, ti, si = mentions(part)
+        choice = {config.ICD: {i: v[0][0] for i, v in ti.items()}, config.SNOMED: {j: v[0][0] for j, v in si.items()}}
+        for i, j in paired:
+            ic, ilp, ig = ti[i]
+            sc, slp, sg = si[j]
+            best, arg = -1e18, None
+            for (x, cx), (y, cy) in product(enumerate(ic), enumerate(sc)):
+                # leave-one-out on the train side: don't count this mention's own gold pair
+                own = loo and ig == cx and sg == cy
+                own_cat = loo and ig is not None and sg == cy and ig[:3] == cx[:3]
+                cnt = n_pair.get((cy, cx), 0) - int(own)
+                cat = n_cat.get((cy, cx[:3]), 0) - int(own_cat)
+                v = ilp[x] + slp[y] + a * np.log1p(max(cnt, 0)) + b * np.log1p(max(cat, 0)) + c * ((cy, cx) in xwalk)
+                if v > best:
+                    best, arg = v, (cx, cy)
+            choice[config.ICD][i], choice[config.SNOMED][j] = arg
+        acc = {}
+        for system, items in ((config.ICD, ti), (config.SNOMED, si)):
+            acc[system] = np.mean([choice[system][i] == items[i][2] for i in items])
+        return acc, len(paired)
+
+    grid = list(product((0, 0.25, 0.5, 1.0), (0, 0.25, 0.5), (0, 0.5, 1.0)))
+    res = [(p, accuracy("train", *p, loo=True)[0]) for p in grid]
+    best = max(res, key=lambda r: min(r[1].values()))
+    base_tr = accuracy("train", 0, 0, 0, loo=True)[0]
+    print(f"train side (OOF): independent ICD {base_tr[config.ICD]:.4f} SNOMED {base_tr[config.SNOMED]:.4f}; "
+          f"best joint a,b,c={best[0]} -> ICD {best[1][config.ICD]:.4f} SNOMED {best[1][config.SNOMED]:.4f}")
+    base_va, n_p = accuracy("val", 0, 0, 0, loo=False)
+    joint_va, _ = accuracy("val", *best[0], loo=False)
+    print(f"held-out ({n_p} paired mentions): independent ICD {base_va[config.ICD]:.4f} SNOMED {base_va[config.SNOMED]:.4f}"
+          f" -> joint ICD {joint_va[config.ICD]:.4f} SNOMED {joint_va[config.SNOMED]:.4f}")
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "run"
-    if cmd == "ce":
-        run_ce(int(sys.argv[2]) if len(sys.argv) > 2 else 15, int(sys.argv[3]) if len(sys.argv) > 3 else 2)
+    if cmd == "joint":
+        run_joint(int(sys.argv[2]) if len(sys.argv) > 2 else 10)
+    elif cmd == "ce":
+        run_ce(int(sys.argv[2]) if len(sys.argv) > 2 else 15, int(sys.argv[3]) if len(sys.argv) > 3 else 2,
+               int(sys.argv[4]) if len(sys.argv) > 4 else 0)
     elif cmd == "llm":
         run_llm(float(sys.argv[2]) if len(sys.argv) > 2 else 0.8, int(sys.argv[3]) if len(sys.argv) > 3 else 200,
                 int(sys.argv[4]) if len(sys.argv) > 4 else 15)

@@ -22,6 +22,7 @@ All numbers are exact-match accuracy on held-out data. "Split" is the fixed 20% 
 | 9 | + synonyms-only fine-tuned SapBERT instead of base (with cross-encoder) | CV5 | 0.654 | 0.606 | 0.940 | 0.922 | 0.420 | 0.479 | A6000 |
 | R2 | synonyms-only SapBERT fine-tune (no labelled terms), retrieval only acc@1 / r@15 | split | 0.369→0.354 / 0.689→0.699 | 0.460→0.441 / 0.724→0.697 | | | | | A6000 |
 | L5 | Qwen-32B-AWQ, batch 10 (ICD only so far): LLM acc on sent 0.409 vs ranker 0.449; best policy | split | 0.625 → 0.653 | pending | | | | | A6000 |
+| J1 | joint ICD+SNOMED decoding (pair co-occurrence + open crosswalk; weights tuned on train-side OOF), base features no SapBERT | split | 0.546 → 0.557 | 0.524 → 0.517 | | | | | cloud CPU |
 | L1 | Gemini 2.5 Flash on conf < 0.6, top-8 (on #5, first 200 split terms) | split-200 | 0.520 → 0.610 | 0.545 → 0.655 | | | | | cloud |
 
 CV5 run #6 extra diagnostics:
@@ -40,3 +41,5 @@ Cross-encoder notes: it's weaker alone but complementary; blending at 0.3 helped
 Both of these settings were chosen on the same split, so the CV5 run is the real test.
 
 #8 vs #9: the cross-encoder accounts for the CV gain (+1.1 ICD, +2.9 SNOMED over #7). The synonyms-only encoder is neutral (R2 retrieval slightly worse; #9 ≈ #8), so base SapBERT stays the default. The large R1 retrieval gain came from training terms; using it without leakage needs cross-fitted encoders (not yet done).
+
+J1: joint decoding helps ICD slightly (the SNOMED pick informs the ICD choice) but not SNOMED, the headline system. Train-side tuning gave +0.9/+0.3; on held-out +1.1/−0.7. Not shipped; documented as tried.
