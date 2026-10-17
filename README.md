@@ -61,7 +61,7 @@ The engine is deterministic: there's no sampling, the seeds are fixed, and folds
 - `GET /terminology/concept/{icd10cm|snomed}/{code}`, `GET /terminology/crosswalk/{system}/{code}`, `GET /terminology/search?q=`, `GET /terminology/versions`: our own terminology service over open sources. It replaces UMLS lookups; see [`docs/architecture.md`](docs/architecture.md).
 - `GET /external/clinicaltables/{icd10cm|conditions}?q=` and `GET /external/umls/{search|crosswalk}`: proxies to public sources. These send the query to a third party, so never use them with chart text.
 
-## Current results (grouped 80/20 hold-out on DiagnosisCode rows, no LLM)
+## Current results (grouped hold-out on DiagnosisCode rows, no LLM; full log in [docs/experiments.md](docs/experiments.md))
 
 | version | ICD exact | SNOMED exact | ICD cand. recall | SNOMED cand. recall | ICD unseen | SNOMED unseen |
 |---|---|---|---|---|---|---|
@@ -70,6 +70,7 @@ The engine is deterministic: there's no sampling, the seeds are fixed, and folds
 | + LambdaRank, relative features | 0.533 | 0.535 | 0.866 | 0.857 | 0.257 | 0.375 |
 | + paired-display memory (lab) | 0.561 | 0.535 | 0.870 | 0.857 | 0.317 | 0.394 |
 | + open-ontology + CDC aliases (lab) | 0.550 | 0.527 | 0.893 | 0.866 | 0.317 | 0.369 |
+| **+ SapBERT retrieval (A6000), 5-fold CV** | **0.647** | **0.580** | 0.932 | 0.919 | 0.428 | 0.447 |
 
 LLM adjudication (Gemini 2.5 Flash, terms with confidence < 0.6, top-8 candidates), measured on the first 200 held-out terms per system:
 

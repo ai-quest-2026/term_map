@@ -1,0 +1,19 @@
+# Experiment log
+
+All numbers are exact-match accuracy on held-out data. "Split" is the fixed 20% chunk-grouped hold-out (469 ICD, 565 SNOMED terms, ±2 pt noise). "CV5" is 5-fold chunk-grouped cross-validation over all 2,305 ICD and 2,700 SNOMED diagnosis rows (±1 pt).
+
+| # | Change | Eval | ICD exact | SNOMED exact | ICD recall | SNOMED recall | ICD unseen | SNOMED unseen | Machine |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | lexical TF-IDF + HGB ranker | split | 0.525 | 0.517 | 0.849 | 0.823 | 0.238 | 0.348 | cloud CPU |
+| 2 | + scispacy word vectors, soft/context features | split | 0.529 | 0.515 | 0.870 | 0.857 | 0.248 | 0.362 | cloud CPU |
+| 3 | + LambdaRank, relative features | split | 0.533 | 0.535 | 0.866 | 0.857 | 0.257 | 0.375 | cloud CPU |
+| 4 | + other system's gold display in memory | split | 0.561 | 0.535 | 0.870 | 0.857 | 0.317 | 0.394 | cloud CPU |
+| 5 | + CDC / DOID / Mondo / HPO aliases | split | 0.550 | 0.527 | 0.893 | 0.866 | 0.317 | 0.369 | cloud CPU |
+| 6 | + SapBERT dictionary + memory retrieval | split | **0.633** | **0.581** | 0.930 | 0.904 | 0.416 | 0.436 | A6000 |
+| 6 | same | CV5 | **0.647** | **0.580** | 0.932 | 0.919 | 0.428 | 0.447 | A6000 |
+| L1 | Gemini 2.5 Flash on conf < 0.6, top-8 (on #5, first 200 split terms) | split-200 | 0.520 → 0.610 | 0.545 → 0.655 | | | | | cloud |
+
+CV5 run #6 extra diagnostics:
+- **ICD 3-char category accuracy:** 0.758.
+- **Accuracy at 97/90/80% coverage:** ICD 0.663 / 0.695 / 0.747; SNOMED 0.596 / 0.630 / 0.679.
+- **Latency:** 22 / 26 ms per term.
