@@ -57,11 +57,5 @@ fi
 if [ "$SAPBERT" = 0 ]; then export TERMMAP_SAPBERT=0; fi
 
 step "building dictionary caches and retrieval indexes (first run ~6 min$( [ "$SAPBERT" = 1 ] && echo ', plus SapBERT encoding' ))"
-if [ "$SAPBERT" = 1 ] && [ ! -f data/cache/sapbert_ft_syn/config.json ]; then
-  # base SapBERT index first (needed to mine hard negatives), then the leak-free synonyms-only fine-tune
-  TERMMAP_SAPBERT_MODEL=base $PY -c "from termmap.engine import CodeSystem; from termmap import config; [CodeSystem.load(s) for s in config.SYSTEMS]"
-  step "fine-tuning SapBERT on open synonym pairs (no labelled terms)"
-  TERMMAP_SAPBERT_MODEL=base $PY -m scripts.finetune_sapbert --epochs 2 --no-train-terms --aliases 40000
-fi
 $PY -c "from termmap.engine import CodeSystem; from termmap import config; [CodeSystem.load(s) for s in config.SYSTEMS]"
 step "setup done. Next: python -m scripts.evaluate   or   python -m scripts.predict --input <csv> --output preds.csv"
