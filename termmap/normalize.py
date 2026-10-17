@@ -58,7 +58,19 @@ ABBREVIATIONS: dict[str, list[str]] = {
     "w/": ["with"], "w/o": ["without"], "b/l": ["bilateral"], "bilat": ["bilateral"], "lt": ["left"], "rt": ["right"],
     "chr": ["chronic"], "ac": ["acute"], "neg": ["negative"], "pos": ["positive"], "hyperchol": ["hypercholesterolemia"],
     "hypothyr": ["hypothyroidism"], "hyperthyr": ["hyperthyroidism"], "anx": ["anxiety"], "dep": ["depression"],
+    # Coronary anatomy shorthand from cath / echo reports ("30% focal mrca stenosis", "90% ladd1").
+    "rca": ["right coronary artery"], "mrca": ["mid right coronary artery"], "prca": ["proximal right coronary artery"],
+    "drca": ["distal right coronary artery"], "lcx": ["left circumflex coronary artery"],
+    "lm": ["left main coronary artery"], "lmca": ["left main coronary artery"], "mlad": ["mid left anterior descending artery"],
+    "plad": ["proximal left anterior descending artery"], "dlad": ["distal left anterior descending artery"],
+    "ladd1": ["first diagonal branch of left anterior descending artery"], "d1": ["first diagonal branch"],
+    "om": ["obtuse marginal branch", "otitis media"], "om1": ["first obtuse marginal branch"],
+    "pda": ["posterior descending artery", "patent ductus arteriosus"], "lv": ["left ventricle"], "rv": ["right ventricle"],
+    "lvef": ["left ventricular ejection fraction"], "bp": ["blood pressure"], "hr": ["heart rate"],
+    "v/d": ["vomiting and diarrhea"], "n/v/d": ["nausea vomiting and diarrhea"], "tb": ["tuberculosis", "theraband"],
+    "hcc": ["hierarchical condition category", "hepatocellular carcinoma"],
 }
+ABBREVIATIONS["lad"] = ["lymphadenopathy", "left anterior descending artery"]
 
 _LATERALITY = {
     "left": "left", "lt": "left", "right": "right", "rt": "right", "bilateral": "bilateral", "b/l": "bilateral",
@@ -107,6 +119,34 @@ def expansions(entity: str) -> list[str]:
             seen.add(q)
             uniq.append(q)
     return uniq
+
+
+_POL_CUES = {"no", "not", "non", "without", "neither", "nor", "absent"}
+_POL_STOP = {"of", "or", "and", "the", "a", "an", "any", "to", "with", "in", "on"}
+
+
+def polarity(text: str) -> tuple[set[str], set[str]]:
+    """(negated words, asserted words) inside one phrase: "acute non recurrent sinusitis" negates
+    "recurrent"; "nonintractable" negates "intractable"; "without hypoxia" negates "hypoxia"."""
+    toks = basic(text).split()
+    neg: set[str] = set()
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t.startswith("non") and len(t) > 6 and t not in ("nonspecific",):
+            neg.add(t[3:])
+        if t in _POL_CUES or (t == "w" and i + 1 < len(toks) and toks[i + 1] == "o"):
+            # "non" binds to the next word only ("non recurrent ethmoidal"); other cues to the next two.
+            j, taken, scope = i + (2 if t == "w" else 1), 0, 1 if t == "non" else 2
+            while j < len(toks) and taken < scope:
+                if toks[j] not in _POL_STOP:
+                    neg.add(toks[j])
+                    taken += 1
+                j += 1
+        i += 1
+    pos = {t for t in toks if t not in neg and t not in _POL_CUES and t not in _POL_STOP and not t.startswith("non")
+           and len(t) > 1}
+    return neg, pos
 
 
 def icd_codes_in_text(entity: str) -> list[str]:

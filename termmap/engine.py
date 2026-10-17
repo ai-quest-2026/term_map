@@ -17,7 +17,7 @@ from rapidfuzz import fuzz
 
 from . import config, data, llm
 from .normalize import (ABBREVIATIONS, basic, context_window, expansions, icd_codes_in_text, is_history,
-                        is_negated, laterality)
+                        is_negated, laterality, polarity)
 import os
 
 from .embed import SAPBERT_SNOMED_TAGS, DenseIndex, SapbertIndex, sapbert_available, word_vectors
@@ -153,6 +153,7 @@ FEATURES = [
     "q_neg", "d_neg", "q_hist", "d_hist", "q_ntok", "q_abbrev", "rank_in_group", "score_gap",
     "d_dense", "d_dense_rank", "m_dense", "soft_q", "soft_d", "ctx_dense", "head_match", "cat_unspec_rate",
     "neg_query", "ext_alias", "d_sap", "d_sap_rank", "m_sap", "m_sap_votes",
+    "drift_parent", "polarity_conflict", "polarity_match",
 ] + [f"tag_{t}" for t in _SN_TAGS]
 
 
@@ -173,6 +174,7 @@ class Cand:
     m_dense: float = 0.0
     neg_query: int = 0
     ext_alias: int = 0
+    drift_parent: int = 0
     d_sap: float = 0.0
     d_sap_rank: int = 99
     m_sap: float = 0.0
@@ -261,6 +263,12 @@ def _gather(entity: str, chunk: str, cs: CodeSystem, mem: Memory, dict_hits, mem
         for c in top:
             for sib in cs.unspec_by_cat.get(c.code[:3], [])[:4]:
                 get(sib).hier = 1
+        # Version drift: gold labels sometimes use a parent code that a recent release split into
+        # children (M51.36 -> M51.360/...). Offer the non-leaf parent of the top candidates.
+        for c in top[:3]:
+            parent = c.code[:-1].rstrip(".")
+            if len(parent) >= 4 and parent in cs.valid and not cs.is_leaf.get(parent, True):
+                get(parent).drift_parent = 1
         for code in list(cands):
             if code[0] in "ST" and len(code) == 8 and code[-1] in "DS":
                 a = code[:-1] + "A"
@@ -288,6 +296,7 @@ def _featurize(entity: str, chunk: str, cands: dict[str, Cand], cs: CodeSystem, 
     ctx_vec = wv.embed([" ".join(sorted(ctx))])[0]
     ctx_sim = wv.embed([c.text for c in clist]) @ ctx_vec if clist else []
     head = qn.split()[-1] if qn else ""
+    q_negw, q_posw = polarity(entity)
     unspec_rate = mem.unspec_rate(cs) if cs.system == config.ICD else {}
     rows = []
     for ci, c in enumerate(clist):
@@ -297,6 +306,7 @@ def _featurize(entity: str, chunk: str, cands: dict[str, Cand], cs: CodeSystem, 
         extra = dt - qt
         tag = cs.tag.get(c.code, "")
         dl = c.text.split()
+        d_negw, d_posw = polarity(c.text)
         rows.append({
             "code": c.code, "d_char": c.d_char, "d_char_rank": c.d_char_rank, "d_word": c.d_word,
             "d_word_rank": c.d_word_rank, "d_exact": c.d_exact, "m_char": c.m_char, "m_rank": c.m_rank,
@@ -320,7 +330,10 @@ def _featurize(entity: str, chunk: str, cands: dict[str, Cand], cs: CodeSystem, 
             "head_match": int(head in dt),
             "cat_unspec_rate": unspec_rate.get(c.code[:3], -1.0),
             "neg_query": c.neg_query, "ext_alias": c.ext_alias, "d_sap": c.d_sap, "d_sap_rank": c.d_sap_rank,
-            "m_sap": c.m_sap, "m_sap_votes": c.m_sap_votes,
+            "m_sap": c.m_sap, "m_sap_votes": c.m_sap_votes, "drift_parent": c.drift_parent,
+            # Opposite meaning: the term negates a word the candidate asserts, or vice versa.
+            "polarity_conflict": len(q_negw & d_posw) + len(d_negw & q_posw),
+            "polarity_match": len(q_negw & d_negw),
             **{f"tag_{t}": int(tag == t) for t in _SN_TAGS},
         })
     df = pd.DataFrame(rows)
@@ -411,7 +424,9 @@ class TermMapEngine:
         tasks = []
         for i in low:
             g = top[top.item == i]
-            cands = [(c, cs.pref.get(c, "") + (f" ({cs.tag[c]})" if cs.tag.get(c) else "")) for c in g.code]
+            cands = [(c, cs.pref.get(c, "") + (f" ({cs.tag[c]})" if cs.tag.get(c) else "")
+                      + (f" [{c[:3]}: {cs.pref[c[:3]]}]" if system == config.ICD and c[:3] in cs.pref and c != c[:3] else ""))
+                     for c in g.code]
             tasks.append({"entity": items.entity.iloc[i], "system": system,
                           "context": context_window(items.entity.iloc[i], items.chunk_text.iloc[i], 150),
                           "candidates": cands})

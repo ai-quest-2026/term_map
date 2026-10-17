@@ -11,9 +11,12 @@ All numbers are exact-match accuracy on held-out data. "Split" is the fixed 20% 
 | 5 | + CDC / DOID / Mondo / HPO aliases | split | 0.550 | 0.527 | 0.893 | 0.866 | 0.317 | 0.369 | cloud CPU |
 | 6 | + SapBERT dictionary + memory retrieval | split | **0.633** | **0.581** | 0.930 | 0.904 | 0.416 | 0.436 | A6000 |
 | 6 | same | CV5 | **0.647** | **0.580** | 0.932 | 0.919 | 0.428 | 0.447 | A6000 |
+| 7 | + polarity-conflict / drift-parent features, coronary abbreviations (no SapBERT, vs #5) | split | 0.544 | 0.533 | 0.900 | 0.867 | 0.287 | 0.383 | cloud CPU |
 | L1 | Gemini 2.5 Flash on conf < 0.6, top-8 (on #5, first 200 split terms) | split-200 | 0.520 → 0.610 | 0.545 → 0.655 | | | | | cloud |
 
 CV5 run #6 extra diagnostics:
 - **ICD 3-char category accuracy:** 0.758.
 - **Accuracy at 97/90/80% coverage:** ICD 0.663 / 0.695 / 0.747; SNOMED 0.596 / 0.630 / 0.679.
 - **Latency:** 22 / 26 ms per term.
+
+Notes on #7: an ablation on the same features moved ICD −0.9 / SNOMED +0.9 points, which is noise. The polarity flag fires on 19–36% of terms, too broad to be discriminative. Drift-gold terms: 9 in the split, 1 correct with or without the feature. Kept as neutral and cheap; verdict pending CV5 with SapBERT. Conclusion: the remaining decision errors need semantic judgement (LLM / cross-encoder), not more hand-made features.
