@@ -18,6 +18,7 @@ All numbers are exact-match accuracy on held-out data. "Split" is the fixed 20% 
 | L4 | same, 1 term per request | split | 0.625 → 0.653 | 0.581 → 0.589 | | | | | A6000 |
 | C1 | cross-encoder (SapBERT init, listwise, top-15, 2 epochs); alone / blend w=0.3 | split | 0.480 / **0.655** | 0.499 / **0.607** | gold@15 0.898 | gold@15 0.837 | | | A6000 |
 | R1 | SapBERT fine-tuned on train-side pairs + 15k synonym pairs/system: retrieval only, acc@1 / r@15 | split | 0.369→0.429 / 0.689→0.821 | 0.460→0.510 / 0.724→0.788 | | | unseen r@15 0.673→0.772 | unseen r@15 0.653→0.723 | A6000 |
+| 8 | + synonyms-only fine-tuned SapBERT (no labelled terms) + cross-encoder blend w=0.3 | CV5 | **0.654** | **0.606** | 0.940 | 0.922 | 0.420 | 0.479 | A6000 |
 | L1 | Gemini 2.5 Flash on conf < 0.6, top-8 (on #5, first 200 split terms) | split-200 | 0.520 → 0.610 | 0.545 → 0.655 | | | | | cloud |
 
 CV5 run #6 extra diagnostics:

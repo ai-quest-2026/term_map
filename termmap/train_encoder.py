@@ -18,7 +18,7 @@ from .embed import SAPBERT_MODEL, SapbertEncoder
 def finetune(pairs: list[tuple[str, str, str]], hard_negs: dict[int, str], out_dir, epochs: int = 2,
              lr: float = 2e-5, batch: int = 128, scale: float = 20.0, log_every: int = 20) -> SapbertEncoder:
     """pairs: (term, positive description, code id); hard_negs: pair index -> hard negative description."""
-    enc = SapbertEncoder(SAPBERT_MODEL)
+    enc = SapbertEncoder(SAPBERT_MODEL)  # always fine-tune from the public weights
     torch, model, tok = enc.torch, enc.model, enc.tok
     dev = model.device
     rng = random.Random(config.SEED)

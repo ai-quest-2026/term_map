@@ -22,7 +22,7 @@ import pandas as pd
 
 from scripts.evaluate import split
 from termmap import config, data
-from termmap.embed import sapbert
+from termmap.embed import SAPBERT_MODEL, sapbert, sapbert_model
 from termmap.engine import CodeSystem
 from termmap.normalize import basic
 from termmap.train_encoder import finetune, search
@@ -52,6 +52,8 @@ def main():
     train = data.load_train()
     is_val = split(train, 0.2)
     tr, va = train[~is_val], train[is_val]
+    if sapbert_model() != SAPBERT_MODEL:
+        raise SystemExit("set TERMMAP_SAPBERT_MODEL=base: fine-tuning is compared against the public SapBERT")
     base = sapbert()
     systems = {s: CodeSystem.load(s) for s in config.SYSTEMS}
 

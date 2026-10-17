@@ -140,8 +140,14 @@ SAPBERT_MODEL = "cambridgeltl/SapBERT-from-PubMedBERT-fulltext"  # Apache-2.0
 
 
 def sapbert_model() -> str:
-    """Encoder in use: TERMMAP_SAPBERT_MODEL (e.g. a fine-tuned copy in data/cache/) or the public SapBERT."""
-    return os.environ.get("TERMMAP_SAPBERT_MODEL", "").strip() or SAPBERT_MODEL
+    """Encoder in use. TERMMAP_SAPBERT_MODEL wins ("base" = public SapBERT); otherwise the synonyms-only
+    fine-tuned copy (data/cache/sapbert_ft_syn, built by `scripts.finetune_sapbert --no-train-terms`) when it
+    exists, because it never saw labelled terms and measured +3.1 headline in 5-fold CV."""
+    env = os.environ.get("TERMMAP_SAPBERT_MODEL", "").strip()
+    if env:
+        return SAPBERT_MODEL if env == "base" else env
+    ft = config.CACHE_DIR / "sapbert_ft_syn"
+    return str(ft) if (ft / "config.json").exists() else SAPBERT_MODEL
 
 
 def sapbert_tag() -> str:
