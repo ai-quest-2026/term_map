@@ -2,7 +2,7 @@
 
     python -m scripts.ranker_lab dump      # build raw features for the grouped split (slow, once per retrieval change)
     python -m scripts.ranker_lab run       # train/score ranker variants on the cache (seconds)
-    python -m scripts.ranker_lab llm [threshold] [max_terms]   # LLM adjudication gain on the val split
+    python -m scripts.ranker_lab llm [threshold] [max_terms] [k]   # LLM adjudication gain on the val split
 """
 from __future__ import annotations
 
@@ -63,7 +63,7 @@ def run(variants: dict[str, dict] | None = None):
                       f"seen={hit[seen].mean():.4f} unseen={hit[~seen].mean():.4f}")
 
 
-def run_llm(threshold: float = 0.6, max_terms: int = 200, k: int = 8):
+def run_llm(threshold: float = 0.8, max_terms: int = 200, k: int = 15):
     """Accuracy before/after LLM adjudication of low-confidence val terms (first `max_terms` per system)."""
     if not llm.enabled():
         raise SystemExit("set LLM_PROVIDER and its key in .env first")
@@ -88,6 +88,7 @@ def run_llm(threshold: float = 0.6, max_terms: int = 200, k: int = 8):
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "run"
     if cmd == "llm":
-        run_llm(float(sys.argv[2]) if len(sys.argv) > 2 else 0.6, int(sys.argv[3]) if len(sys.argv) > 3 else 200)
+        run_llm(float(sys.argv[2]) if len(sys.argv) > 2 else 0.8, int(sys.argv[3]) if len(sys.argv) > 3 else 200,
+                int(sys.argv[4]) if len(sys.argv) > 4 else 15)
     else:
         {"dump": dump, "run": run}[cmd]()

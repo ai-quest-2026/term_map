@@ -172,17 +172,21 @@ class SapbertEncoder:
         return np.stack([self.cache[t] for t in texts]) if texts else np.zeros((0, 768), dtype=np.float16)
 
     def encode(self, texts: list[str], batch: int = 256, log_every: int = 0) -> np.ndarray:
-        out = []
+        if not texts:
+            return np.zeros((0, 768), dtype=np.float16)
+        # Batch texts of similar length together (far less padding), then restore the input order.
+        order = sorted(range(len(texts)), key=lambda i: (len(texts[i]), texts[i]))
+        out = np.zeros((len(texts), 768), dtype=np.float16)
         with self.torch.inference_mode():
-            for s in range(0, len(texts), batch):
-                enc = self.tok(texts[s:s + batch], padding=True, truncation=True, max_length=self.max_length,
-                               return_tensors="pt").to(self.model.device)
+            for b, s in enumerate(range(0, len(order), batch)):
+                idx = order[s:s + batch]
+                enc = self.tok([texts[i] for i in idx], padding=True, truncation=True,
+                               max_length=self.max_length, return_tensors="pt").to(self.model.device)
                 cls = self.model(**enc).last_hidden_state[:, 0]
-                cls = self.torch.nn.functional.normalize(cls, dim=-1)
-                out.append(cls.cpu().numpy().astype(np.float16))
-                if log_every and (s // batch) % log_every == 0:
-                    print(f"  sapbert {s + len(out[-1])}/{len(texts)}", flush=True)
-        return np.concatenate(out) if out else np.zeros((0, 768), dtype=np.float16)
+                out[idx] = self.torch.nn.functional.normalize(cls, dim=-1).cpu().numpy().astype(np.float16)
+                if log_every and b % log_every == 0:
+                    print(f"  sapbert {s + len(idx)}/{len(texts)}", flush=True)
+        return out
 
 
 @lru_cache(maxsize=1)
