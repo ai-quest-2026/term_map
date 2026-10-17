@@ -18,7 +18,9 @@ from rapidfuzz import fuzz
 from . import config, data, llm
 from .normalize import (ABBREVIATIONS, basic, context_window, expansions, icd_codes_in_text, is_history,
                         is_negated, laterality)
-from .embed import DenseIndex, word_vectors
+import os
+
+from .embed import SAPBERT_SNOMED_TAGS, DenseIndex, SapbertIndex, sapbert_available, word_vectors
 from .rank import DERIVED, Ranker, derive, softmax_by_group
 from .retrieve import DictionaryRetriever, LexicalIndex
 
@@ -33,6 +35,11 @@ _SN_TAGS = ["disorder", "finding", "morphologic abnormality", "situation", "obse
 
 
 # --------------------------------------------------------------------------- dictionary side
+
+def use_sapbert() -> bool:
+    """SapBERT retrieval is on when torch/transformers are installed (TERMMAP_SAPBERT=0 disables it)."""
+    return os.environ.get("TERMMAP_SAPBERT", "1") == "1" and sapbert_available()
+
 
 class CodeSystem:
     """Dictionary retriever plus per-code metadata for one coding system."""
@@ -59,19 +66,34 @@ class CodeSystem:
         texts, codes = df.description.tolist(), df.code.tolist()
         # Optional aliases ingested from public sources (scripts/ingest.py); restricted to the
         # supplied dictionary so predictions stay inside the legal answer space.
-        ext = config.EXTERNAL_DIR / f"{system}_aliases.parquet"
-        if ext.exists():
+        self.ext_pairs: set[tuple[str, str]] = set()
+        for ext in sorted(config.EXTERNAL_DIR.glob(f"{system}_aliases*.parquet")):
             al = pd.read_parquet(ext)
             al = al[al.code.isin(self.valid)]
             texts += al.description.tolist()
             codes += al.code.tolist()
+            self.ext_pairs |= {(c, basic(t)) for c, t in zip(al.code, al.description)}
         self.retriever = DictionaryRetriever(texts, codes, dense_factory=DenseIndex)
+        self.attach_sapbert()
+
+    def attach_sapbert(self) -> bool:
+        """Add the SapBERT index to the retriever (also to a cached CodeSystem built before torch was installed)."""
+        r = self.retriever
+        if not use_sapbert() or getattr(r, "sap", None) is not None:
+            return False
+        keep = [i for i, c in enumerate(r.char.codes) if self.system == config.ICD or self.tag.get(c) in SAPBERT_SNOMED_TAGS]
+        r.sap = SapbertIndex([r.char.texts[i] for i in keep], [r.char.codes[i] for i in keep], name=self.system)
+        r._cache.clear()
+        return True
 
     @classmethod
     def load(cls, system: str) -> "CodeSystem":
         path = config.CACHE_DIR / f"codesystem_{system}.joblib"
         if path.exists():
-            return joblib.load(path)
+            cs = joblib.load(path)
+            if cs.attach_sapbert():
+                joblib.dump(cs, path, compress=0)
+            return cs
         cs = cls(system)
         cs.retriever._cache.clear()
         joblib.dump(cs, path, compress=0)
@@ -97,6 +119,7 @@ class Memory:
             self.exact[t][c] += 1
         self.index = LexicalIndex("char").fit(texts, codes) if texts else None
         self.dense = DenseIndex(texts, codes) if texts else None
+        self.sap = SapbertIndex(texts, codes) if texts and use_sapbert() else None
         diag = rows[rows.subconcept == "DiagnosisCode"]
         self.freq = Counter(diag.code)
         self.cat_freq = Counter(c[:3] for c in diag.code) if system == config.ICD else Counter()
@@ -116,8 +139,9 @@ class Memory:
 
     def search(self, queries: list[str], k: int = K_MEM):
         if self.index is None:
-            return [([], []) for _ in queries]
-        return list(zip(self.index.search(queries, k), self.dense.search(queries, k)))
+            return [([], [], []) for _ in queries]
+        sap = self.sap.search(queries, k) if getattr(self, "sap", None) is not None else [[] for _ in queries]
+        return list(zip(self.index.search(queries, k), self.dense.search(queries, k), sap))
 
 
 # --------------------------------------------------------------------------- features
@@ -128,7 +152,7 @@ FEATURES = [
     "jacc", "q_cov", "d_cov", "tsr", "ratio", "lat_match", "lat_extra", "lat_missing", "ctx_overlap",
     "q_neg", "d_neg", "q_hist", "d_hist", "q_ntok", "q_abbrev", "rank_in_group", "score_gap",
     "d_dense", "d_dense_rank", "m_dense", "soft_q", "soft_d", "ctx_dense", "head_match", "cat_unspec_rate",
-    "neg_query",
+    "neg_query", "ext_alias", "d_sap", "d_sap_rank", "m_sap", "m_sap_votes",
 ] + [f"tag_{t}" for t in _SN_TAGS]
 
 
@@ -148,6 +172,11 @@ class Cand:
     d_dense_rank: int = 99
     m_dense: float = 0.0
     neg_query: int = 0
+    ext_alias: int = 0
+    d_sap: float = 0.0
+    d_sap_rank: int = 99
+    m_sap: float = 0.0
+    m_sap_votes: float = 0.0
     from_expansion: int = 1
     code_in_text: int = 0
     hier: int = 0
@@ -163,7 +192,7 @@ def _gather(entity: str, chunk: str, cs: CodeSystem, mem: Memory, dict_hits, mem
             cands[code] = Cand(code)
         return cands[code]
 
-    for qi, (q, (ch, wd, de), (mh, mdh)) in enumerate(zip(queries, dict_hits, mem_hits)):
+    for qi, (q, (ch, wd, de, sp), (mh, mdh, msp)) in enumerate(zip(queries, dict_hits, mem_hits)):
         orig = int(qi > 0)
         negq = int(q.startswith("no ") or q.endswith(" absent"))
         for h in ch[:10] if negq else ():
@@ -172,6 +201,8 @@ def _gather(entity: str, chunk: str, cs: CodeSystem, mem: Memory, dict_hits, mem
             get(h.code).neg_query = 1
         for h in ch:
             c = get(h.code)
+            if (h.code, h.text) in cs.ext_pairs:
+                c.ext_alias = max(c.ext_alias, 1)
             if h.score > c.d_char:
                 c.d_char, c.text = h.score, h.text
             c.d_char_rank = min(c.d_char_rank, h.rank)
@@ -195,6 +226,17 @@ def _gather(entity: str, chunk: str, cs: CodeSystem, mem: Memory, dict_hits, mem
         for h in mdh[:5]:
             c = get(h.code)
             c.m_dense = max(c.m_dense, h.score)
+        for h in sp:
+            c = get(h.code)
+            c.d_sap = max(c.d_sap, h.score)
+            c.d_sap_rank = min(c.d_sap_rank, h.rank)
+            c.from_expansion = min(c.from_expansion, orig)
+            if not c.text:
+                c.text = h.text
+        for h in msp[:10]:
+            c = get(h.code)
+            c.m_sap = max(c.m_sap, h.score)
+            c.m_sap_votes += h.score
         for code in cs.retriever.exact.get(q, ()):
             get(code).d_exact = 1
             if not cands[code].text:
@@ -277,7 +319,8 @@ def _featurize(entity: str, chunk: str, cands: dict[str, Cand], cs: CodeSystem, 
             "ctx_dense": float(ctx_sim[ci]),
             "head_match": int(head in dt),
             "cat_unspec_rate": unspec_rate.get(c.code[:3], -1.0),
-            "neg_query": c.neg_query,
+            "neg_query": c.neg_query, "ext_alias": c.ext_alias, "d_sap": c.d_sap, "d_sap_rank": c.d_sap_rank,
+            "m_sap": c.m_sap, "m_sap_votes": c.m_sap_votes,
             **{f"tag_{t}": int(tag == t) for t in _SN_TAGS},
         })
     df = pd.DataFrame(rows)

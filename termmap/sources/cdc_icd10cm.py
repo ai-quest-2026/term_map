@@ -60,12 +60,20 @@ def parse_index(xml: bytes) -> pd.DataFrame:
     rows = []
     root = ET.parse(io.BytesIO(xml)).getroot()
 
+    def title_of(el) -> str:
+        t = el.find("title")
+        if t is None:
+            return ""
+        # Drop nonessential modifiers "(chronic) (acute)" and the "see"/"code to" cross-reference noise.
+        text = " ".join("".join(t.itertext()).split())
+        return re.sub(r"\s*\([^)]*\)", "", text).strip(" ,-")
+
     def walk(el, path):
-        title = " ".join("".join(el.find("title").itertext()).split()) if el.find("title") is not None else ""
+        title = title_of(el)
         here = path + [title] if title else path
-        code = (el.findtext("code") or "").strip()
+        code = (el.findtext("code") or "").strip().rstrip("-").upper()
         if code and here:
-            rows.append((code.replace("-", ""), " ".join(reversed(here[1:])) + " " + here[0] if len(here) > 1 else here[0]))
+            rows.append((code, " ".join(here)))
         for child in el.findall("term"):
             walk(child, here)
 

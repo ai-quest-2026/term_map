@@ -131,3 +131,119 @@ class DenseIndex:
                         break
                 out.append(hits)
         return out
+
+
+# --------------------------------------------------------------------------- SapBERT (optional)
+
+SAPBERT_MODEL = "cambridgeltl/SapBERT-from-PubMedBERT-fulltext"  # Apache-2.0
+# SNOMED tags covering ~95% of the gold diagnosis concepts; the rest stay lexical-only to save encode time.
+SAPBERT_SNOMED_TAGS = {"disorder", "finding", "morphologic abnormality", "situation", "observable entity", "event"}
+
+
+def sapbert_available() -> bool:
+    try:
+        import torch  # noqa: F401
+        import transformers  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+class SapbertEncoder:
+    def __init__(self, model: str = SAPBERT_MODEL, max_length: int = 32):
+        import torch
+        from transformers import AutoModel, AutoTokenizer
+
+        torch.manual_seed(config.SEED)
+        self.torch = torch
+        self.tok = AutoTokenizer.from_pretrained(model)
+        self.model = AutoModel.from_pretrained(model).eval()
+        self.max_length = max_length
+        self.cache: dict[str, np.ndarray] = {}
+        if torch.cuda.is_available():
+            self.model = self.model.cuda()
+
+    def encode_cached(self, texts: list[str]) -> np.ndarray:
+        """Encode with an in-process cache (queries and memory aliases recur across folds)."""
+        todo = sorted({t for t in texts if t not in self.cache})
+        if todo:
+            for t, v in zip(todo, self.encode(todo)):
+                self.cache[t] = v
+        return np.stack([self.cache[t] for t in texts]) if texts else np.zeros((0, 768), dtype=np.float16)
+
+    def encode(self, texts: list[str], batch: int = 256, log_every: int = 0) -> np.ndarray:
+        out = []
+        with self.torch.inference_mode():
+            for s in range(0, len(texts), batch):
+                enc = self.tok(texts[s:s + batch], padding=True, truncation=True, max_length=self.max_length,
+                               return_tensors="pt").to(self.model.device)
+                cls = self.model(**enc).last_hidden_state[:, 0]
+                cls = self.torch.nn.functional.normalize(cls, dim=-1)
+                out.append(cls.cpu().numpy().astype(np.float16))
+                if log_every and (s // batch) % log_every == 0:
+                    print(f"  sapbert {s + len(out[-1])}/{len(texts)}", flush=True)
+        return np.concatenate(out) if out else np.zeros((0, 768), dtype=np.float16)
+
+
+@lru_cache(maxsize=1)
+def sapbert() -> SapbertEncoder:
+    return SapbertEncoder()
+
+
+class SapbertIndex:
+    """Dense retrieval with SapBERT [CLS] embeddings; vectors cached per unique text in data/cache."""
+
+    def __init__(self, texts: list[str], codes: list[str], name: str | None = None):
+        norm = [basic(t) for t in texts]
+        uniq = sorted(set(norm))
+        path = config.CACHE_DIR / f"sapbert_{name}.npy"
+        names = config.CACHE_DIR / f"sapbert_{name}.json"
+        if name is None:
+            mat = sapbert().encode_cached(uniq)
+        elif path.exists() and names.exists() and json.loads(names.read_text()) == uniq:
+            mat = np.load(path)
+        else:
+            print(f"encoding {len(uniq)} {name} texts with SapBERT (one-time)...", flush=True)
+            mat = sapbert().encode(uniq, log_every=200)
+            np.save(path, mat)
+            names.write_text(json.dumps(uniq))
+        self.name = name
+        self.texts = np.array(uniq, dtype=object)
+        self.mat = mat.astype(np.float32)  # float32 for BLAS matmul; float16 on disk
+        pos = {t: i for i, t in enumerate(uniq)}
+        self.codes_of: list[list[str]] = [[] for _ in uniq]
+        for t, c in zip(norm, codes):
+            self.codes_of[pos[t]].append(c)
+
+    def __getstate__(self):
+        # Named indexes keep their vectors in data/cache/sapbert_<name>.npy; don't duplicate them in pickles.
+        state = dict(self.__dict__)
+        if self.name is not None:
+            state["mat"] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        if self.mat is None:
+            self.mat = np.load(config.CACHE_DIR / f"sapbert_{self.name}.npy").astype(np.float32)
+
+    def search(self, queries: list[str], k: int = 30, batch: int = 256) -> list[list[Hit]]:
+        out = []
+        q = sapbert().encode_cached([basic(x) for x in queries]).astype(np.float32)
+        for s in range(0, len(q), batch):
+            sims = q[s:s + batch] @ self.mat.T
+            for row in sims:
+                take = min(len(row), k * 3)
+                idx = np.argpartition(-row, take - 1)[:take]
+                idx = idx[np.argsort(-row[idx], kind="stable")]
+                hits, seen = [], set()
+                for d in idx:
+                    for c in self.codes_of[d]:
+                        if c in seen:
+                            continue
+                        seen.add(c)
+                        hits.append(Hit(c, float(row[d]), len(hits), self.texts[d]))
+                    if len(hits) >= k:
+                        break
+                out.append(hits[:k])
+        return out

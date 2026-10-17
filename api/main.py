@@ -4,6 +4,7 @@
 
 Mapping:          POST /map, POST /map/batch
 Dictionaries:     GET /search, GET /codes/{system}/{code}
+Terminology:      GET /terminology/... (our own local service over open ontologies + CDC; no UMLS needed)
 Public sources:   GET /external/... (thin proxies over the clients in termmap.sources; these send the
                   query to a third party, so never call them with chart data)
 """
@@ -15,7 +16,7 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from termmap import config
+from termmap import config, terminology
 from termmap.normalize import basic
 from termmap.sources import clinical_tables, umls
 
@@ -101,6 +102,42 @@ def code_info(system: str, code: str):
     else:
         info.update(semantic_tag=cs.tag.get(code, ""))
     return info
+
+
+# --------------------------------------------------------------------------- local terminology service
+
+def _system(system: str) -> str:
+    sysname = _SYSTEM_ALIASES.get(system.lower())
+    if not sysname:
+        raise HTTPException(400, f"unknown system {system}")
+    return sysname
+
+
+@app.get("/terminology/concept/{system}/{code}")
+def term_concept(system: str, code: str):
+    """Dictionary descriptions + open-ontology synonyms + linked codes for one code (UMLS-like lookup)."""
+    sysname = _system(system)
+    info = terminology.concept_info(sysname, code)
+    cs = engine().systems[sysname]
+    info["dictionary_display"] = cs.pref.get(code, "")
+    return info
+
+
+@app.get("/terminology/crosswalk/{system}/{code}")
+def term_crosswalk(system: str, code: str):
+    """Codes in the other system linked through shared open-ontology concepts (not ground truth)."""
+    return terminology.crosswalk(_system(system), code)
+
+
+@app.get("/terminology/search")
+def term_search(q: str, k: int = 20):
+    """Synonym search across DOID, Mondo and HPO with the dictionary codes each concept links to."""
+    return terminology.search(q, k)
+
+
+@app.get("/terminology/versions")
+def term_versions():
+    return terminology.table("versions").to_dict("records")
 
 
 # --------------------------------------------------------------------------- public sources
