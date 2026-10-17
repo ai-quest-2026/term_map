@@ -61,36 +61,31 @@ The engine is deterministic: there's no sampling, the seeds are fixed, and folds
 - `GET /terminology/concept/{icd10cm|snomed}/{code}`, `GET /terminology/crosswalk/{system}/{code}`, `GET /terminology/search?q=`, `GET /terminology/versions`: our own terminology service over open sources. It replaces UMLS lookups; see [`docs/architecture.md`](docs/architecture.md).
 - `GET /external/clinicaltables/{icd10cm|conditions}?q=` and `GET /external/umls/{search|crosswalk}`: proxies to public sources. These send the query to a third party, so never use them with chart text.
 
-## Current results (grouped hold-out on DiagnosisCode rows, no LLM; full log in [docs/experiments.md](docs/experiments.md))
+## Current results (5-fold CV grouped by chunk, all 5,005 DiagnosisCode rows; full log in [docs/experiments.md](docs/experiments.md))
 
-| version | ICD exact | SNOMED exact | ICD cand. recall | SNOMED cand. recall | ICD unseen | SNOMED unseen |
-|---|---|---|---|---|---|---|
-| v0.1 lexical + HGB | 0.525 | 0.517 | 0.849 | 0.823 | 0.238 | 0.348 |
-| + word-vector dense | 0.529 | 0.515 | 0.870 | 0.857 | 0.248 | 0.362 |
-| + LambdaRank, relative features | 0.533 | 0.535 | 0.866 | 0.857 | 0.257 | 0.375 |
-| + paired-display memory (lab) | 0.561 | 0.535 | 0.870 | 0.857 | 0.317 | 0.394 |
-| + open-ontology + CDC aliases (lab) | 0.550 | 0.527 | 0.893 | 0.866 | 0.317 | 0.369 |
-| **+ SapBERT retrieval (A6000), 5-fold CV** | **0.647** | **0.580** | 0.932 | 0.919 | 0.428 | 0.447 |
+**Locked configuration:** hybrid retrieval (char/word TF-IDF, scispacy vectors, SapBERT, training memory, open-synonym aliases, ICD hierarchy) → LambdaRank → cross-encoder blend (w = 0.3 over the top 15). LLM off.
 
-LLM adjudication (Gemini 2.5 Flash, terms with confidence < 0.6, top-8 candidates), measured on the first 200 held-out terms per system:
-
-| | before | after | terms sent to LLM |
+| version | ICD exact | SNOMED exact | headline (min) |
 |---|---|---|---|
-| ICD-10-CM | 0.520 | **0.610** | 108 / 200 |
-| SNOMED CT | 0.545 | **0.655** | 112 / 200 |
+| lexical + learned ranker (20% split) | 0.525 | 0.517 | 0.517 |
+| + SapBERT retrieval, LambdaRank, open aliases, cross-system memory | 0.647 | 0.580 | 0.580 |
+| **+ cross-encoder reranker (final)** | **0.658** | **0.604** | **0.604** |
 
-With 469 ICD and 565 SNOMED validation terms, differences under about 2 points are noise.
+- Codes unseen in training (long tail): ICD 0.440, SNOMED 0.477. ICD right 3-character category: 0.770.
+- The gold code is among the candidates for 93% (ICD) / 92% (SNOMED) of terms; about 81% of errors are ranking decisions, not retrieval misses.
+- Answering only the most confident 80% of terms: ICD 0.753 / SNOMED 0.687.
+- Reproduce: `python -m scripts.evaluate --cv 5` (the cross-encoder turns on automatically with a GPU; `--ce off` to skip it).
 
-When the gold code is among the candidates, the ranker picks it only about 62% of the time. Many of the misses are close calls that need clinical judgement ("neck discomfort" → neck pain vs discomfort). The next levers are LLM adjudication of low-confidence terms, and a sentence-level biomedical encoder (SapBERT / BioLORD) once Hugging Face is reachable.
+Tried and not shipped (numbers in the experiment log): local LLM adjudication (Qwen2.5-14B/32B, only +2–3 as a gated tie-breaker on one split), SapBERT fine-tuning, synonym-augmented cross-encoder, joint ICD+SNOMED decoding, polarity/drift features. See [docs/writeup.md](docs/writeup.md) for the write-up.
 
 Fast ranker experiments: `python -m scripts.ranker_lab dump` once per retrieval change, then `python -m scripts.ranker_lab run`.
 
 ## LLM adjudication (optional, off by default)
 Set in `.env` or as environment variables: `LLM_PROVIDER=gemini` and `GEMINI_API_KEY=...` (optionally `GEMINI_MODEL`). For the GPU box, use `LLM_PROVIDER=openai_compat` with `OPENAI_COMPAT_BASE_URL` and `OPENAI_COMPAT_MODEL` (vLLM, Ollama, llama.cpp).
 
-Only terms whose top candidate has a probability below 0.6 are sent. The model must pick one of the top 8 candidates. Temperature is 0, and every response is cached in `data/cache/llm/` so reruns are identical.
+Only terms whose ranker confidence is below `--llm-threshold` (default 0.8) are sent, with the top 15 candidates; the pick is applied only if the ranker gives it at least 0.3 × the top probability (`TERMMAP_LLM_GATE`). Temperature is 0, and every response is cached in `data/cache/llm/` so reruns are identical.
 
-- Measure: `python -m scripts.ranker_lab llm 0.6 200`, or `python -m scripts.evaluate --llm`.
+- Measure: `python -m scripts.evaluate --llm`. Early Gemini 2.5 Flash test on 200 held-out terms: ICD 0.520 → 0.610, SNOMED 0.545 → 0.655 (hosted API, so not used further).
 - **Data caveat:** hosted free tiers may retain prompts, which the dataset terms forbid. Use them only for small experiments, and run the final pipeline on a self-hosted model.
 
 ## Public resources
