@@ -144,6 +144,21 @@ class Memory:
         self.n = max(len(diag), 1)
         self.diag_codes = Counter(diag.code)
         self._unspec_rate: dict[str, float] | None = None
+        # Labelled diagnosis terms, used as few-shot examples of local coding convention for the LLM.
+        self._ex = (list(diag.entity), list(diag.code))
+        self._ex_index = None
+
+    def examples(self, queries: list[str], k: int = 5) -> list[list[tuple[str, str]]]:
+        """Most similar labelled training terms (entity, gold code) per query: SapBERT if available, else char."""
+        if not self._ex[0]:
+            return [[] for _ in queries]
+        if getattr(self, "_ex_index", None) is None:
+            ents, codes = self._ex
+            ids = [str(i) for i in range(len(ents))]
+            self._ex_index = (SapbertIndex(ents, ids) if use_sapbert() else LexicalIndex("char").fit(ents, ids))
+        ents, codes = self._ex
+        hits = self._ex_index.search([basic(q) for q in queries], k)
+        return [[(ents[int(h.code)], codes[int(h.code)]) for h in hs] for hs in hits]
 
     def unspec_rate(self, cs: "CodeSystem") -> dict[str, float]:
         """Per ICD category: share of training golds that are an 'unspecified' code (coder convention)."""
@@ -495,6 +510,10 @@ class TermMapEngine:
             tasks.append({"entity": items.entity.iloc[i], "system": system,
                           "context": context_window(items.entity.iloc[i], items.chunk_text.iloc[i], 150),
                           "candidates": cands})
+        mem, n_ex = self.memory.get(system), int(os.environ.get("TERMMAP_LLM_EXAMPLES", "5"))
+        if mem is not None and n_ex > 0 and tasks:
+            for t, ex in zip(tasks, mem.examples([t["entity"] for t in tasks], n_ex)):
+                t["examples"] = [(e, c, cs.pref.get(c, "")) for e, c in ex]
         picks = llm.adjudicate(tasks)
         X.attrs["llm_picks"] = dict(zip(low, picks))
         for i, code in zip(low, picks):

@@ -32,6 +32,9 @@ Rules:
   if it states site, side, type, acuity or stage, prefer the code that encodes it.
 - For SNOMED CT, prefer the clinical finding/disorder concept for the condition mentioned; choose a
   negative concept ("No ...", "... absent") only if the text clearly states the finding is absent.
+- Some tasks show how our own coders coded similar terms. Their conventions (how specific to be, which
+  concept they prefer, how they treat negated findings) take priority over your general preference when the
+  situation matches. Still choose only from that task's candidates.
 Answer with JSON only: [{"task": <task number>, "choice": <candidate number>}, ...]"""
 
 
@@ -106,6 +109,10 @@ def adjudicate(tasks: list[dict], batch: int | None = None) -> list[str | None]:
         lines = []
         for i, t in enumerate(chunk, 1):
             lines.append(f"### Task {i}\nSystem: {t['system']}\nTerm: {t['entity']}\nContext: {t['context']}")
+            if t.get("examples"):
+                lines.append("Similar terms coded by our coders:")
+                lines += [f"  - '{e}' -> {c} {d}" for e, c, d in t["examples"]]
+                lines.append("Candidates:")
             lines += [f"  {j}. {code} - {desc}" for j, (code, desc) in enumerate(t["candidates"], 1)]
         picks = _parse(_complete("\n".join(lines)))
         for i, t in enumerate(chunk, 1):

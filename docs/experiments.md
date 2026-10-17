@@ -21,6 +21,7 @@ All numbers are exact-match accuracy on held-out data. "Split" is the fixed 20% 
 | 8 | + cross-encoder blend w=0.3 (base SapBERT) | CV5 | **0.658** | **0.604** | 0.933 | 0.921 | 0.440 | 0.477 | A6000 |
 | 9 | + synonyms-only fine-tuned SapBERT instead of base (with cross-encoder) | CV5 | 0.654 | 0.606 | 0.940 | 0.922 | 0.420 | 0.479 | A6000 |
 | R2 | synonyms-only SapBERT fine-tune (no labelled terms), retrieval only acc@1 / r@15 | split | 0.369→0.354 / 0.689→0.699 | 0.460→0.441 / 0.724→0.697 | | | | | A6000 |
+| L5 | Qwen-32B-AWQ, batch 10 (ICD only so far): LLM acc on sent 0.409 vs ranker 0.449; best policy | split | 0.625 → 0.653 | pending | | | | | A6000 |
 | L1 | Gemini 2.5 Flash on conf < 0.6, top-8 (on #5, first 200 split terms) | split-200 | 0.520 → 0.610 | 0.545 → 0.655 | | | | | cloud |
 
 CV5 run #6 extra diagnostics:

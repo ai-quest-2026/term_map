@@ -72,9 +72,11 @@ def run_llm(threshold: float = 0.8, max_terms: int = 200, k: int = 15):
     if not llm.enabled():
         raise SystemExit("set LLM_PROVIDER and its key in .env first")
     train = data.load_train()
-    va = train[split(train, 0.2)]
+    is_val = split(train, 0.2)
+    tr, va = train[~is_val], train[is_val]
     eng = TermMapEngine()
     for system in config.SYSTEMS:
+        eng.memory[system] = Memory(tr, system)  # few-shot examples come from the train side only
         items = va[(va.coding_system == system) & (va.subconcept == "DiagnosisCode")].reset_index(drop=True)
         Xva = derive(pd.read_parquet(_path("val", system)))
         Xva["prob"] = softmax_by_group(Xva, Ranker(FEATURES + DERIVED).fit(derive(pd.read_parquet(
