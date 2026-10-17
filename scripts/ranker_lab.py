@@ -133,43 +133,10 @@ def _items(train: pd.DataFrame, system: str):
     return tr_items, {i: (r.entity, r.chunk_text) for i, r in va_rows.iterrows()}
 
 
-def synonym_groups(cs, n: int, k: int = 15) -> list[tuple[str, list[str], int]]:
-    """Distant supervision for the cross-encoder: open-ontology / CDC synonyms ("hyperpiesia" -> I10) as
-    queries, our own dictionary search results as candidates, the synonym's code as the answer.
-    No labelled terms are used, so this adds no leakage."""
-    import random
-
-    from termmap.cross_encoder import candidate_text
-    from termmap.normalize import basic
-
-    rng = random.Random(config.SEED)
-    al = []
-    for f in sorted(config.EXTERNAL_DIR.glob(f"{cs.system}_aliases*.parquet")):
-        a = pd.read_parquet(f)
-        al += [(basic(t), c) for t, c in zip(a.description, a.code)
-               if c in cs.pref and basic(t) and basic(t) != basic(cs.pref[c])]
-    al = sorted(set(al))
-    rng.shuffle(al)
-    al = al[:n]
-    res = cs.retriever.search([t for t, _ in al], 30)
-    groups = []
-    for (t, code), (ch, wd, de, sp) in zip(al, res):
-        cands = []
-        for h in (sp or []) + ch + wd:  # SapBERT hits first: the hardest negatives
-            if h.code not in cands:
-                cands.append(h.code)
-        cands = cands[:k]
-        if code not in cands:
-            cands[-1:] = [code]
-        cands = sorted(cands, key=lambda c: rng.random())  # gold position must not leak
-        groups.append((f"{t} ; ", [candidate_text(c, cs) for c in cands], cands.index(code)))
-    return groups
-
-
 def run_ce(k: int = 15, epochs: int = 2, syn: int = 0):
     """Cross-encoder over the ranker's top-k: trained on the train side's OOF candidates (+ optional
     synonym groups), tested on val. Reports ranker alone, cross-encoder alone and z-score blends."""
-    from termmap.cross_encoder import CrossEncoder, candidate_text, query_text
+    from termmap.cross_encoder import CrossEncoder, candidate_text, query_text, synonym_groups
     from termmap.engine import CodeSystem
 
     train = data.load_train()

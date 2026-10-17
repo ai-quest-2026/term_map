@@ -12,7 +12,7 @@ import numpy as np
 
 from . import config
 from .embed import SAPBERT_MODEL
-from .normalize import context_window
+from .normalize import basic, context_window
 
 
 def query_text(entity: str, chunk: str) -> str:
@@ -92,3 +92,35 @@ class CrossEncoder:
     def save(self, path):
         self.model.save_pretrained(path)
         self.tok.save_pretrained(path)
+
+
+def synonym_groups(cs, n: int, k: int = 15) -> list[tuple[str, list[str], int]]:
+    """Distant supervision for the cross-encoder: open-ontology / CDC synonyms ("hyperpiesia" -> I10) as
+    queries, our own dictionary search results as candidates, the synonym's code as the answer.
+    No labelled terms are used, so this adds no leakage."""
+    import random
+
+    import pandas as pd
+
+    rng = random.Random(config.SEED)
+    al = []
+    for f in sorted(config.EXTERNAL_DIR.glob(f"{cs.system}_aliases*.parquet")):
+        a = pd.read_parquet(f)
+        al += [(basic(t), c) for t, c in zip(a.description, a.code)
+               if c in cs.pref and basic(t) and basic(t) != basic(cs.pref[c])]
+    al = sorted(set(al))
+    rng.shuffle(al)
+    al = al[:n]
+    res = cs.retriever.search([t for t, _ in al], 30)
+    groups = []
+    for (t, code), (ch, wd, de, sp) in zip(al, res):
+        cands = []
+        for h in (sp or []) + ch + wd:  # SapBERT hits first: the hardest negatives
+            if h.code not in cands:
+                cands.append(h.code)
+        cands = cands[:k]
+        if code not in cands:
+            cands[-1:] = [code]
+        cands = sorted(cands, key=lambda c: rng.random())  # gold position must not leak
+        groups.append((f"{t} ; ", [candidate_text(c, cs) for c in cands], cands.index(code)))
+    return groups

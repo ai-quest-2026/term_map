@@ -447,7 +447,7 @@ class TermMapEngine:
 
     def _train_ce(self, train, system, X):
         """Cross-encoder on the ranker's top-k OOF candidates (gold + hard negatives) of the training terms."""
-        from .cross_encoder import CrossEncoder, candidate_text, query_text
+        from .cross_encoder import CrossEncoder, candidate_text, query_text, synonym_groups
 
         cs, texts = self.systems[system], self.oof_items(train, system)
         X = X.assign(rk=self.ranker[system].score(X)).sort_values(["item", "rk", "code"], ascending=[True, False, True])
@@ -456,7 +456,10 @@ class TermMapEngine:
             if g.label.max():
                 groups.append((query_text(*texts[item]), [candidate_text(c, cs) for c in g.code],
                                int(np.argmax(g.label.values))))
-        print(f"[{system}] training cross-encoder on {len(groups)} terms")
+        n_syn = int(os.environ.get("TERMMAP_CE_SYN", "0"))
+        if n_syn:  # distant supervision from open synonyms (no labelled terms, no leakage)
+            groups += synonym_groups(cs, n_syn, CE_K)
+        print(f"[{system}] training cross-encoder on {len(groups)} groups ({n_syn} synonym groups)")
         return CrossEncoder().fit(groups, epochs=2, log_every=0)
 
     def rank(self, items: pd.DataFrame, system: str, use_llm: bool = False,
