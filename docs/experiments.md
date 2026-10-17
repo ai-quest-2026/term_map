@@ -23,6 +23,7 @@ All numbers are exact-match accuracy on held-out data. "Split" is the fixed 20% 
 | R2 | synonyms-only SapBERT fine-tune (no labelled terms), retrieval only acc@1 / r@15 | split | 0.369→0.354 / 0.689→0.699 | 0.460→0.441 / 0.724→0.697 | | | | | A6000 |
 | L5 | Qwen-32B-AWQ, batch 10 (ICD only so far): LLM acc on sent 0.409 vs ranker 0.449; best policy | split | 0.625 → 0.653 | pending | | | | | A6000 |
 | J1 | joint ICD+SNOMED decoding (pair co-occurrence + open crosswalk; weights tuned on train-side OOF), base features no SapBERT | split | 0.546 → 0.557 | 0.524 → 0.517 | | | | | cloud CPU |
+| C2 | cross-encoder + 10k synonym groups/system (distant supervision); alone / best blend | split | 0.527 / 0.663 (w=0.5) | 0.519 / 0.604 (w=0.3) | | | | | A6000 |
 | L1 | Gemini 2.5 Flash on conf < 0.6, top-8 (on #5, first 200 split terms) | split-200 | 0.520 → 0.610 | 0.545 → 0.655 | | | | | cloud |
 
 CV5 run #6 extra diagnostics:
@@ -43,3 +44,9 @@ Both of these settings were chosen on the same split, so the CV5 run is the real
 #8 vs #9: the cross-encoder accounts for the CV gain (+1.1 ICD, +2.9 SNOMED over #7). The synonyms-only encoder is neutral (R2 retrieval slightly worse; #9 ≈ #8), so base SapBERT stays the default. The large R1 retrieval gain came from training terms; using it without leakage needs cross-fitted encoders (not yet done).
 
 J1: joint decoding helps ICD slightly (the SNOMED pick informs the ICD choice) but not SNOMED, the headline system. Train-side tuning gave +0.9/+0.3; on held-out +1.1/−0.7. Not shipped; documented as tried.
+
+C2: synonym training makes the cross-encoder better on its own (+4.7 ICD, +2.0 SNOMED) but not in the blend with the ranker (ICD +0.4–0.8, SNOMED −0.3, all within noise). The ranker already supplies the vocabulary signal, and the residual errors are coder convention and context. Kept as an option (TERMMAP_CE_SYN), off by default.
+
+## Locked configuration
+Base SapBERT + lexical/word-vector retrieval + training memory → LambdaRank → cross-encoder blend (w=0.3, top-15), LLM off.
+CV5: ICD 0.658, SNOMED 0.604 (#8).
