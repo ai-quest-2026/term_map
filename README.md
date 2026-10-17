@@ -58,6 +58,7 @@ The engine is deterministic: there's no sampling, the seeds are fixed, and folds
 - `POST /map/batch`: the same for a list of terms.
 - `GET /search?q=htn&system=snomed`: raw dictionary retrieval.
 - `GET /codes/{icd10cm|snomed}/{code}`: dictionary entry, billable leaf or semantic tag, and training frequency.
+- `GET /terminology/concept/{icd10cm|snomed}/{code}`, `GET /terminology/crosswalk/{system}/{code}`, `GET /terminology/search?q=`, `GET /terminology/versions`: our own terminology service over open sources. It replaces UMLS lookups; see [`docs/architecture.md`](docs/architecture.md).
 - `GET /external/clinicaltables/{icd10cm|conditions}?q=` and `GET /external/umls/{search|crosswalk}`: proxies to public sources. These send the query to a third party, so never use them with chart text.
 
 ## Current results (grouped 80/20 hold-out on DiagnosisCode rows, no LLM)
@@ -68,6 +69,14 @@ The engine is deterministic: there's no sampling, the seeds are fixed, and folds
 | + word-vector dense | 0.529 | 0.515 | 0.870 | 0.857 | 0.248 | 0.362 |
 | + LambdaRank, relative features | 0.533 | 0.535 | 0.866 | 0.857 | 0.257 | 0.375 |
 | + paired-display memory (lab) | 0.561 | 0.535 | 0.870 | 0.857 | 0.317 | 0.394 |
+| + open-ontology + CDC aliases (lab) | 0.550 | 0.527 | 0.893 | 0.866 | 0.317 | 0.369 |
+
+LLM adjudication (Gemini 2.5 Flash, terms with confidence < 0.6, top-8 candidates), measured on the first 200 held-out terms per system:
+
+| | before | after | terms sent to LLM |
+|---|---|---|---|
+| ICD-10-CM | 0.520 | **0.610** | 108 / 200 |
+| SNOMED CT | 0.545 | **0.655** | 112 / 200 |
 
 With 469 ICD and 565 SNOMED validation terms, differences under about 2 points are noise.
 
@@ -88,6 +97,7 @@ Only terms whose top candidate has a probability below 0.6 are sent. The model m
 | Resource | Use | Status |
 |---|---|---|
 | CDC/NCHS ICD-10-CM FY2026 tabular + index XML (public domain) | inclusion terms and index paths as extra ICD aliases | `python -m scripts.ingest cdc --year 2026` |
+| Disease Ontology (CC0), Mondo (CC BY 4.0), HPO (attribution) | synonyms, open SNOMED↔ICD crosswalk, `/terminology/*` | `python -m scripts.ingest obo` |
 | NLM SNOMED CT → ICD-10-CM map (UMLS licence) | agreement prior between the two predictions | put the TSV in `data/external/`, then `python -m scripts.ingest map` |
 | UMLS UTS REST API (UMLS licence) | synonyms, crosswalk exploration | `UMLS_API_KEY` in `.env` |
 | NLM Clinical Table Search (keyless) | consumer-name aliases for ICD | `termmap/sources/clinical_tables.py` |
@@ -102,7 +112,7 @@ All of this is ingested offline into `data/external/`. Inference never calls the
 4. Download the *SNOMED CT to ICD-10-CM Map* human-readable TSV from the NLM licensed-content downloads and put it in `data/external/`.
 
 ### Cloud dev container network
-To use the public sources from a Claude Code cloud session, allowlist these hosts in the environment's network settings: `huggingface.co`, `cdn-lfs.huggingface.co`, `cas-bridge.xethub.hf.co`, `uts-ws.nlm.nih.gov`, `clinicaltables.nlm.nih.gov`, `ftp.cdc.gov`, and `generativelanguage.googleapis.com` (if testing Gemini).
+To use the public sources from a Claude Code cloud session, allowlist these hosts in the environment's network settings: `huggingface.co`, `cdn-lfs.huggingface.co`, `cas-bridge.xethub.hf.co`, `cas-server.xethub.hf.co`, `us.aws.cdn.hf.co` (model weights), `raw.githubusercontent.com` (ontologies), `uts-ws.nlm.nih.gov`, `clinicaltables.nlm.nih.gov`, `ftp.cdc.gov`, and `generativelanguage.googleapis.com` (if testing Gemini).
 
 ## Layout
 ```
