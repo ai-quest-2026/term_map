@@ -528,8 +528,9 @@ class TermMapEngine:
                 X.loc[m, "llm"] = 1
         return X.sort_values(["item", "key", "code"], ascending=[True, False, True])
 
-    def predict(self, items: pd.DataFrame, top_n: int = 5, use_llm: bool | None = None) -> pd.DataFrame:
-        use_llm = llm.enabled() if use_llm is None else use_llm
+    def predict(self, items: pd.DataFrame, top_n: int = 5, use_llm: bool = False) -> pd.DataFrame:
+        """LLM adjudication only when asked for explicitly (and LLM_PROVIDER is set): the shipped
+        configuration is LLM-off, and a provider left in .env must not change predictions silently."""
         items = items.reset_index(drop=True)
         out = items[[c for c in items.columns if c in ("chunk_id", "entity", "clinical_entity", "chunk_text")]].copy()
         for system in config.SYSTEMS:
