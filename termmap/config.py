@@ -37,6 +37,8 @@ SNOMED = "SNOMEDCT_US"
 SYSTEMS = (ICD, SNOMED)
 
 SEED = 13
+# Bit-reproducible cuBLAS on GPU; must be set before CUDA initialises, so it lives here (imported first).
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 # SNOMED semantic tags that never hold a diagnosis/condition answer; dropped from the index
 # to cut the candidate space roughly in half.

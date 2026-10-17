@@ -33,11 +33,16 @@ class CrossEncoder:
         import torch
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
+        # Training on GPU must give the same weights every run: deterministic kernels, eager attention
+        # (fused attention backward uses atomics), cuBLAS workspace pinned in config.
         torch.manual_seed(config.SEED)
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark = True, False
         self.torch = torch
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.tok = AutoTokenizer.from_pretrained(model)
-        self.model = AutoModelForSequenceClassification.from_pretrained(model, num_labels=1).to(self.device)
+        self.model = AutoModelForSequenceClassification.from_pretrained(
+            model, num_labels=1, attn_implementation="eager").to(self.device)
         self.max_length = max_length
 
     def _logits(self, queries: list[str], cands: list[str]):
