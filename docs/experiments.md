@@ -12,6 +12,7 @@ All numbers are exact-match accuracy on held-out data. "Split" is the fixed 20% 
 | 6 | + SapBERT dictionary + memory retrieval | split | **0.633** | **0.581** | 0.930 | 0.904 | 0.416 | 0.436 | A6000 |
 | 6 | same | CV5 | **0.647** | **0.580** | 0.932 | 0.919 | 0.428 | 0.447 | A6000 |
 | 7 | + polarity-conflict / drift-parent features, coronary abbreviations (no SapBERT, vs #5) | split | 0.544 | 0.533 | 0.900 | 0.867 | 0.287 | 0.383 | cloud CPU |
+| 7 | same as #7, with SapBERT | CV5 | 0.647 | 0.575 | 0.933 | 0.921 | 0.429 | 0.447 | A6000 |
 | L1 | Gemini 2.5 Flash on conf < 0.6, top-8 (on #5, first 200 split terms) | split-200 | 0.520 → 0.610 | 0.545 → 0.655 | | | | | cloud |
 
 CV5 run #6 extra diagnostics:
@@ -20,3 +21,5 @@ CV5 run #6 extra diagnostics:
 - **Latency:** 22 / 26 ms per term.
 
 Notes on #7: an ablation on the same features moved ICD −0.9 / SNOMED +0.9 points, which is noise. The polarity flag fires on 19–36% of terms, too broad to be discriminative. Drift-gold terms: 9 in the split, 1 correct with or without the feature. Kept as neutral and cheap; verdict pending CV5 with SapBERT. Conclusion: the remaining decision errors need semantic judgement (LLM / cross-encoder), not more hand-made features.
+
+#7 CV5 verdict: no gain over #6 (ICD 0.6473 → 0.6469, SNOMED 0.5804 → 0.5752). The polarity features were removed. The retrieval-side additions (coronary abbreviations, drift-parent candidates) were kept because they're recall-neutral-to-positive.

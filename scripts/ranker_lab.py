@@ -3,11 +3,13 @@
     python -m scripts.ranker_lab dump      # build raw features for the grouped split (slow, once per retrieval change)
     python -m scripts.ranker_lab run       # train/score ranker variants on the cache (seconds)
     python -m scripts.ranker_lab llm [threshold] [max_terms] [k]   # LLM adjudication gain on the val split
+    python -m scripts.ranker_lab ce [k] [epochs]   # train a cross-encoder reranker on the train side, test on val
 """
 from __future__ import annotations
 
 import sys
 
+import numpy as np
 import pandas as pd
 
 from scripts.evaluate import split
@@ -85,9 +87,67 @@ def run_llm(threshold: float = 0.8, max_terms: int = 200, k: int = 15):
         print(f"[{system}] n={n} sent_to_llm={sent} before={before / n:.4f} after={after / n:.4f}")
 
 
+def _items(train: pd.DataFrame, system: str):
+    """Rebuild the term rows behind the cached feature tables (same order and ids as `dump`)."""
+    is_val = split(train, 0.2)
+    tr, va = train[~is_val], train[is_val]
+    folds = TermMapEngine._folds(tr)
+    target = (tr.coding_system == system) & (tr.subconcept == "DiagnosisCode")
+    tr_items = {}
+    for f in range(5):
+        rows = tr[target & (folds == f)].reset_index(drop=True)
+        for i, r in rows.iterrows():
+            tr_items[f * 1_000_000 + i] = (r.entity, r.chunk_text)
+    va_rows = va[(va.coding_system == system) & (va.subconcept == "DiagnosisCode")].reset_index(drop=True)
+    return tr_items, {i: (r.entity, r.chunk_text) for i, r in va_rows.iterrows()}
+
+
+def run_ce(k: int = 15, epochs: int = 2):
+    """Cross-encoder over the ranker's top-k: trained on the train side's OOF candidates, tested on val.
+    Reports ranker alone, cross-encoder alone and z-score blends of the two."""
+    from termmap.cross_encoder import CrossEncoder, candidate_text, query_text
+    from termmap.engine import CodeSystem
+
+    train = data.load_train()
+    for system in config.SYSTEMS:
+        cs = CodeSystem.load(system)
+        tr_items, va_items = _items(train, system)
+        Xtr = derive(pd.read_parquet(_path("train", system)))
+        Xva = derive(pd.read_parquet(_path("val", system)))
+        ranker = Ranker(FEATURES + DERIVED).fit(Xtr)
+        for X in (Xtr, Xva):
+            X["rk"] = ranker.score(X)
+        tops = {}
+        for name, X in (("train", Xtr), ("val", Xva)):
+            X = X.sort_values(["item", "rk", "code"], ascending=[True, False, True])
+            tops[name] = X.groupby("item").head(k)
+        groups = []
+        for item, g in tops["train"].groupby("item"):
+            if g.label.max() == 0:
+                continue
+            ent, chunk = tr_items[item]
+            groups.append((query_text(ent, chunk), [candidate_text(c, cs) for c in g.code], int(np.argmax(g.label.values))))
+        print(f"[{system}] training cross-encoder on {len(groups)} terms x {k} candidates")
+        ce = CrossEncoder().fit(groups, epochs=epochs)
+        ce.save(config.CACHE_DIR / f"ce_{system}")
+        V = tops["val"].copy()
+        V["q"] = [query_text(*va_items[i]) for i in V.item]
+        V["ce"] = ce.score(V.q.tolist(), [candidate_text(c, cs) for c in V.code])
+        n = Xva.item.nunique()
+        z = lambda col: (V[col] - V.groupby("item")[col].transform("mean")) / (V.groupby("item")[col].transform("std") + 1e-6)
+        V["zrk"], V["zce"] = z("rk"), z("ce")
+        print(f"[{system}] val n={n}  gold in top-{k}: {V.groupby('item').label.max().sum() / n:.4f}")
+        for name, col in [("ranker", V.rk), ("cross-encoder", V.ce)] + [
+                (f"blend w_ce={w}", (1 - w) * V.zrk + w * V.zce) for w in (0.3, 0.5, 0.7)]:
+            hit = V.assign(s=col).sort_values(["item", "s"], ascending=[True, False]).groupby("item").head(1).label.sum()
+            print(f"  {name:16s} acc={hit / n:.4f}")
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "run"
-    if cmd == "llm":
+    if cmd == "ce":
+        run_ce(int(sys.argv[2]) if len(sys.argv) > 2 else 15, int(sys.argv[3]) if len(sys.argv) > 3 else 2)
+    elif cmd == "llm":
         run_llm(float(sys.argv[2]) if len(sys.argv) > 2 else 0.8, int(sys.argv[3]) if len(sys.argv) > 3 else 200,
                 int(sys.argv[4]) if len(sys.argv) > 4 else 15)
     else:

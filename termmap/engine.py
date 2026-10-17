@@ -17,7 +17,7 @@ from rapidfuzz import fuzz
 
 from . import config, data, llm
 from .normalize import (ABBREVIATIONS, basic, context_window, expansions, icd_codes_in_text, is_history,
-                        is_negated, laterality, polarity)
+                        is_negated, laterality)
 import os
 
 from .embed import SAPBERT_SNOMED_TAGS, DenseIndex, SapbertIndex, sapbert_available, word_vectors
@@ -153,7 +153,7 @@ FEATURES = [
     "q_neg", "d_neg", "q_hist", "d_hist", "q_ntok", "q_abbrev", "rank_in_group", "score_gap",
     "d_dense", "d_dense_rank", "m_dense", "soft_q", "soft_d", "ctx_dense", "head_match", "cat_unspec_rate",
     "neg_query", "ext_alias", "d_sap", "d_sap_rank", "m_sap", "m_sap_votes",
-    "drift_parent", "polarity_conflict", "polarity_match",
+    "drift_parent",
 ] + [f"tag_{t}" for t in _SN_TAGS]
 
 
@@ -296,7 +296,6 @@ def _featurize(entity: str, chunk: str, cands: dict[str, Cand], cs: CodeSystem, 
     ctx_vec = wv.embed([" ".join(sorted(ctx))])[0]
     ctx_sim = wv.embed([c.text for c in clist]) @ ctx_vec if clist else []
     head = qn.split()[-1] if qn else ""
-    q_negw, q_posw = polarity(entity)
     unspec_rate = mem.unspec_rate(cs) if cs.system == config.ICD else {}
     rows = []
     for ci, c in enumerate(clist):
@@ -306,7 +305,6 @@ def _featurize(entity: str, chunk: str, cands: dict[str, Cand], cs: CodeSystem, 
         extra = dt - qt
         tag = cs.tag.get(c.code, "")
         dl = c.text.split()
-        d_negw, d_posw = polarity(c.text)
         rows.append({
             "code": c.code, "d_char": c.d_char, "d_char_rank": c.d_char_rank, "d_word": c.d_word,
             "d_word_rank": c.d_word_rank, "d_exact": c.d_exact, "m_char": c.m_char, "m_rank": c.m_rank,
@@ -331,9 +329,6 @@ def _featurize(entity: str, chunk: str, cands: dict[str, Cand], cs: CodeSystem, 
             "cat_unspec_rate": unspec_rate.get(c.code[:3], -1.0),
             "neg_query": c.neg_query, "ext_alias": c.ext_alias, "d_sap": c.d_sap, "d_sap_rank": c.d_sap_rank,
             "m_sap": c.m_sap, "m_sap_votes": c.m_sap_votes, "drift_parent": c.drift_parent,
-            # Opposite meaning: the term negates a word the candidate asserts, or vice versa.
-            "polarity_conflict": len(q_negw & d_posw) + len(d_negw & q_posw),
-            "polarity_match": len(q_negw & d_negw),
             **{f"tag_{t}": int(tag == t) for t in _SN_TAGS},
         })
     df = pd.DataFrame(rows)
