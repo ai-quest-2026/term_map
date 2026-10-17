@@ -64,21 +64,23 @@ class LexicalIndex:
 
 
 class DictionaryRetriever:
-    """Char + word indexes over one code system's dictionary descriptions."""
+    """Char + word (+ optional dense) indexes over one code system's descriptions."""
 
-    def __init__(self, texts: list[str], codes: list[str]):
+    def __init__(self, texts: list[str], codes: list[str], dense_factory=None):
         self.char = LexicalIndex("char", min_df=2).fit(texts, codes)
         self.word = LexicalIndex("word").fit(texts, codes)
+        self.dense = dense_factory(texts, codes) if dense_factory else None
         self.exact: dict[str, set[str]] = {}
         for t, c in zip(self.char.texts, codes):
             self.exact.setdefault(t, set()).add(c)
         self._cache: dict[tuple[str, int], tuple[list[Hit], list[Hit]]] = {}
 
-    def search(self, queries: list[str], k: int = 30) -> list[tuple[list[Hit], list[Hit]]]:
+    def search(self, queries: list[str], k: int = 30) -> list[tuple[list[Hit], list[Hit], list[Hit]]]:
         todo = sorted({q for q in queries if (q, k) not in self._cache})
         if todo:
             ch = self.char.search(todo, k)
             wd = self.word.search(todo, k)
-            for q, a, b in zip(todo, ch, wd):
-                self._cache[(q, k)] = (a, b)
+            de = self.dense.search(todo, k) if self.dense is not None else [[] for _ in todo]
+            for q, a, b, c in zip(todo, ch, wd, de):
+                self._cache[(q, k)] = (a, b, c)
         return [self._cache[(q, k)] for q in queries]

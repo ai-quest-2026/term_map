@@ -19,6 +19,7 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 from . import config, data
 from .normalize import (ABBREVIATIONS, basic, context_window, expansions, icd_codes_in_text, is_history,
                         is_negated, laterality)
+from .embed import DenseIndex, word_vectors
 from .retrieve import DictionaryRetriever, LexicalIndex
 
 K_DICT = 30
@@ -64,7 +65,7 @@ class CodeSystem:
             al = al[al.code.isin(self.valid)]
             texts += al.description.tolist()
             codes += al.code.tolist()
-        self.retriever = DictionaryRetriever(texts, codes)
+        self.retriever = DictionaryRetriever(texts, codes, dense_factory=DenseIndex)
 
     @classmethod
     def load(cls, system: str) -> "CodeSystem":
@@ -90,13 +91,16 @@ class Memory:
         for t, c in zip(texts, codes):
             self.exact[t][c] += 1
         self.index = LexicalIndex("char").fit(texts, codes) if texts else None
+        self.dense = DenseIndex(texts, codes) if texts else None
         diag = rows[rows.subconcept == "DiagnosisCode"]
         self.freq = Counter(diag.code)
         self.cat_freq = Counter(c[:3] for c in diag.code) if system == config.ICD else Counter()
         self.n = max(len(diag), 1)
 
     def search(self, queries: list[str], k: int = K_MEM):
-        return self.index.search(queries, k) if self.index is not None else [[] for _ in queries]
+        if self.index is None:
+            return [([], []) for _ in queries]
+        return list(zip(self.index.search(queries, k), self.dense.search(queries, k)))
 
 
 # --------------------------------------------------------------------------- features
@@ -106,6 +110,7 @@ FEATURES = [
     "from_expansion", "code_in_text", "hier", "freq", "cat_freq", "is_leaf", "unspec", "code_len", "n_desc",
     "jacc", "q_cov", "d_cov", "tsr", "ratio", "lat_match", "lat_extra", "lat_missing", "ctx_overlap",
     "q_neg", "d_neg", "q_hist", "d_hist", "q_ntok", "q_abbrev", "rank_in_group", "score_gap",
+    "d_dense", "d_dense_rank", "m_dense", "soft_q", "soft_d", "ctx_dense",
 ] + [f"tag_{t}" for t in _SN_TAGS]
 
 
@@ -121,6 +126,9 @@ class Cand:
     m_rank: int = 99
     m_votes: float = 0.0
     m_exact: int = 0
+    d_dense: float = 0.0
+    d_dense_rank: int = 99
+    m_dense: float = 0.0
     from_expansion: int = 1
     code_in_text: int = 0
     hier: int = 0
@@ -136,7 +144,7 @@ def _gather(entity: str, chunk: str, cs: CodeSystem, mem: Memory, dict_hits, mem
             cands[code] = Cand(code)
         return cands[code]
 
-    for qi, (q, (ch, wd), mh) in enumerate(zip(queries, dict_hits, mem_hits)):
+    for qi, (q, (ch, wd, de), (mh, mdh)) in enumerate(zip(queries, dict_hits, mem_hits)):
         orig = int(qi > 0)
         for h in ch:
             c = get(h.code)
@@ -153,6 +161,16 @@ def _gather(entity: str, chunk: str, cs: CodeSystem, mem: Memory, dict_hits, mem
             if not c.text:
                 c.text = h.text
             c.sources.add("dict")
+        for h in de:
+            c = get(h.code)
+            c.d_dense = max(c.d_dense, h.score)
+            c.d_dense_rank = min(c.d_dense_rank, h.rank)
+            c.from_expansion = min(c.from_expansion, orig)
+            if not c.text:
+                c.text = h.text
+        for h in mdh[:5]:
+            c = get(h.code)
+            c.m_dense = max(c.m_dense, h.score)
         for code in cs.retriever.exact.get(q, ()):
             get(code).d_exact = 1
             if not cands[code].text:
@@ -192,13 +210,19 @@ def _featurize(entity: str, chunk: str, cands: dict[str, Cand], cs: CodeSystem, 
     q_neg = int(is_negated(entity, chunk))
     q_hist = int(is_history(entity, chunk))
     q_abbrev = int(qn in ABBREVIATIONS or (len(qn) <= 5 and " " not in qn))
+    wv = word_vectors()
+    exp_toks = [q.split() for q in expansions(entity)]
+    clist = list(cands.values())
+    ctx_vec = wv.embed([" ".join(sorted(ctx))])[0]
+    ctx_sim = wv.embed([c.text for c in clist]) @ ctx_vec if clist else []
     rows = []
-    for c in cands.values():
+    for ci, c in enumerate(clist):
         dt = set(c.text.split())
         inter = len(q_exp & dt)
         d_lat = laterality(c.text)
         extra = dt - qt
         tag = cs.tag.get(c.code, "")
+        dl = c.text.split()
         rows.append({
             "code": c.code, "d_char": c.d_char, "d_char_rank": c.d_char_rank, "d_word": c.d_word,
             "d_word_rank": c.d_word_rank, "d_exact": c.d_exact, "m_char": c.m_char, "m_rank": c.m_rank,
@@ -215,6 +239,10 @@ def _featurize(entity: str, chunk: str, cands: dict[str, Cand], cs: CodeSystem, 
             "ctx_overlap": len(extra & ctx) / max(len(extra), 1) if extra else 1.0,
             "q_neg": q_neg, "d_neg": int(bool(dt & _NEG_WORDS)), "q_hist": q_hist, "d_hist": int(bool(dt & _HIST_WORDS)),
             "q_ntok": len(qt), "q_abbrev": q_abbrev,
+            "d_dense": c.d_dense, "d_dense_rank": c.d_dense_rank, "m_dense": c.m_dense,
+            "soft_q": max(wv.soft_coverage(e, dl) for e in exp_toks),
+            "soft_d": max(wv.soft_coverage(dl, e) for e in exp_toks),
+            "ctx_dense": float(ctx_sim[ci]),
             **{f"tag_{t}": int(tag == t) for t in _SN_TAGS},
         })
     df = pd.DataFrame(rows)
