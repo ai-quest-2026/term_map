@@ -1,8 +1,8 @@
 # TermMap: mapping clinical terms to ICD-10-CM and SNOMED CT
 
-*Team submission write-up. Every number is reproducible with the commands in the README; the full experiment log is in `docs/experiments.md`.*
+*Team submission write-up. Every number is reproducible with the commands in the README; the full experiment log is in `docs/experiments.md`. Demo video: DEMO_VIDEO_LINK*
 
-## 1. Problem and how we framed it
+## 1. Approach: the problem and how we framed it
 Each input is an extracted clinical entity plus the chunk of chart text around it. The output is one ICD-10-CM code and one SNOMED CT concept, both from the supplied dictionaries (98k ICD codes; 382k SNOMED concepts, 985k descriptions).
 
 We treat this as **two independent entity-linking problems** (one per system), each solved as *retrieve candidates → rank them*. Three facts from the data shaped the design:
@@ -15,35 +15,10 @@ We treat this as **two independent entity-linking problems** (one per system), e
 
 ## 2. Architecture
 
-```
-entity + chunk_text
-  │ 1. normalise: lowercase, punctuation/OCR clean-up, abbreviation expansion (ambiguous ones → several
-  │    readings), ICD code written in the text, laterality / negation / history cues
-  ▼
-  2. candidate retrieval, per system (union, ~80 candidates)
-     ├─ character 3–4-gram TF-IDF (typos, OCR)         ├─ word 1–2-gram TF-IDF (exact clinical words)
-     ├─ biomedical word vectors (scispacy)             ├─ SapBERT dense retrieval (concept similarity)
-     ├─ training-example memory: char / vectors / SapBERT over labelled terms + gold displays
-     │  (+ the other system's gold display for the same mention)
-     ├─ open-synonym aliases: CDC ICD-10-CM index, Disease Ontology, Mondo, HPO (our own terminology service)
-     └─ ICD hierarchy: "unspecified" leaves, initial-encounter (A) variants, parents of newly split codes
-  ▼
-  3. LambdaRank (LightGBM) over ~90 features: every source's score / rank / gap to the best candidate,
-     coverage and soft (vector) coverage, laterality, context overlap, negation × negative concepts,
-     training-frequency prior gated by textual evidence, leaf / unspecified flags, SNOMED semantic tag
-     → trained out-of-fold, so memory features look on training terms exactly as on unseen terms
-  ▼
-  4. cross-encoder reranker (SapBERT weights) reads [term ; context sentence] × [candidate
-     description (tag) [ICD category]] for the top 30, trained listwise on out-of-fold ranker lists
-  ▼
-  5. LLM selector: local Qwen2.5-7B-Instruct + LoRA adapter, fine-tuned to pick the gold code among
-     the ranked candidates (letter choice); its per-candidate probability is a feature
-  ▼
-  6. stacker (LambdaRank over ranker / cross-encoder / selector scores, ranks and gaps)
-     + exact training-term lookup
-  ▼
-icd10cm_code, snomed_code + calibrated confidence, margin and top-5 alternatives
-```
+![TermMap pipeline: stages, models and resources](architecture.png)
+
+- **Ranker features (S2):** every source's score / rank / gap to the best candidate, word and vector coverage, laterality, context overlap, negation × negative concepts, a training-frequency prior gated by textual evidence, leaf / unspecified flags, SNOMED semantic tag. Trained out-of-fold, so memory features look the same on training terms as on unseen ones.
+- **Cross-encoder (S3)** reads the term marked inside ±128 characters of chart text against the official wording + synonyms (tag) [ICD category], listwise over the out-of-fold top 30. **Selector (S4)** sees the top 20 as lettered options plus "none".
 
 There is one deterministic command: `scripts/predict.py`. Seeds are fixed, LightGBM is deterministic, cross-encoder training uses deterministic GPU kernels, and nothing calls the network at inference. Retrieval and ranking take about 25–30 ms per term per system on CPU. End-to-end, the shipped engine maps 500 terms in 214.5 s on one RTX A6000 (≈ 0.43 s per term for both codes, including loading the 7B model); without the selector the same 500 take 32.7 s (≈ 65 ms per term). Two runs give byte-identical output. The selector is a local open-weight model: no data leaves the machine.
 
@@ -104,7 +79,7 @@ Using the 5-fold predictions (`scripts/error_report.py`):
 - **Cross-system memory.** When a mention is coded in both systems, the other system's gold wording becomes a training alias. This gave +2.8 ICD on the split.
 - **Routing diagnostics.** The LLM is evaluated per confidence bucket, comparing several routing rules. This showed unrestricted LLM overrides *hurt* (−4 to −6), and a gated tie-breaker is the only safe use.
 
-## 7. Tried and abandoned (all logged with numbers)
+## 7. Challenges and learnings: tried and abandoned (all logged with numbers)
 - **Hand-made features:**
   - negation/polarity conflict, version-drift parents, more abbreviations: neutral in 5-fold;
   - joint ICD+SNOMED decoding from pair co-occurrence: +1.1 ICD, −0.7 SNOMED.

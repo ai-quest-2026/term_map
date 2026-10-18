@@ -1,0 +1,14 @@
+%% Architecture diagram for the write-up PDF. Render: bash scripts/make_report.sh (writes docs/architecture.png)
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "15px"}, "flowchart": {"nodeSpacing": 30, "rankSpacing": 32, "wrappingWidth": 640}}}%%
+flowchart TB
+  N["<b>entity + chunk_text</b> → normalise<br/>OCR clean-up · abbreviation readings · laterality / negation cues"]
+  N --> S0{"S0 · exact training-term<br/>lookup (one gold code)?"}
+  S0 -- "yes" --> OUT
+  S0 -- "no" --> R["<b>S1 · Candidate retrieval</b> (per system, ~80 candidates)<br/>char 3–4-gram TF-IDF (typos, OCR) · word TF-IDF · scispacy vectors · SapBERT dense<br/>training-example memory · open aliases (CDC index, DOID, Mondo, HPO) · ICD general codes (.9, NOS)"]
+  D[("ICD-10-CM 98k codes<br/>SNOMED CT 382k concepts")] -.-> R
+  R --> L["<b>S2 · LightGBM LambdaRank</b><br/>~90 features, trained out-of-fold"]
+  L -- "top 30" --> CE["<b>S3 · Cross-encoder</b> (SapBERT init)<br/>[START] term [END] in context × description"]
+  L -- "top 20" --> SEL["<b>S4 · LLM selector</b><br/>local Qwen2.5-7B + LoRA, letter choice"]
+  CE --> ST["<b>S5 · Stacker</b> (LambdaRank over ranker /<br/>cross-encoder / selector scores, ranks, gaps)"]
+  SEL --> ST
+  ST --> OUT["<b>icd10cm_code + snomed_code</b><br/>confidence · margin · top-5 alternatives"]

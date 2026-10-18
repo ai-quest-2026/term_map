@@ -1,0 +1,11 @@
+chunk_id,clinical_entity,chunk_text
+abbr-1,ms,"Neuro f/u. Hx of MS on interferon beta, MRI brain shows new periventricular demyelinating lesions."
+abbr-2,ms,"Echo: severe MS with mitral valve area 0.9 cm2, LA enlarged; cardiology referral for valvuloplasty."
+ocr-1,chronickidney disease stag 3,"A/P: chronickidney disease stag 3, cr stable at 1.6, continue ACE inhibitor."
+ocr-2,diabtes melitus typ 2,"PMH: diabtes melitus typ 2 on metformin, A1c 7.4 last month."
+spec-1,obesity class ii,"BMI 37.2. Assessment: obesity class ii, counselled on diet and exercise."
+spec-2,constipation,"Pt reports constipation for 3 days, no blood in stool. Start senna."
+ctx-1,acute infarct,"MRI brain: acute infarct in the left MCA territory. Stroke team consulted."
+ctx-2,acute infarct,"Troponin 4.2, ST elevation in V2-V4, acute infarct; cath lab activated."
+neg-1,focal neurologic symptoms,"ROS: denies headache, vision change or focal neurologic symptoms."
+side-1,knee pain,"C/o right knee pain after fall, worse on stairs, mild effusion on exam."
