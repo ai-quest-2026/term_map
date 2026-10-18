@@ -97,6 +97,18 @@ Notes on G3/G4:
 - With one cached fold the stacker is fitted on half of fold 0 at a time. On SNOMED it is 0.4 pt below the fixed 0.3 blend; in the 5-fold run it is fitted leave-one-fold-out on ~4× the data.
 - **Decision rule.** The runbook says to run all folds if B ≥ A on both systems, or within −1 pt on one with a clear gain on the other. SNOMED is −0.19 (within −1), but the ICD gain (+1.55, p=0.40) is not clear on 451 terms, and the headline does not beat the baseline (0.6056 vs 0.6074). 5-fold not started; the decision is pending.
 
+### v2 folds 1–4 retrieval (s2), selector fold 0
+s2 for folds 1–4 was run on the CPU (`CUDA_VISIBLE_DEVICES=""`, ~3.5 min per fold) while the selector held the GPU, gated against `reports/baseline_cv5_run9.csv` (`logs/v2_s2_f1-4.log`). All 8 recall gates PASS.
+
+| Fold | ICD ranker top-1 / cand. recall (vs #9) | SNOMED ranker top-1 / cand. recall (vs #9) |
+|---|---|---|
+| 1 | 0.6505 / 0.9341 (0.9341) | 0.5958 / 0.9291 (0.9291) |
+| 2 | 0.6193 / 0.9387 (0.9365) | 0.5615 / 0.8981 (0.9019) |
+| 3 | 0.6721 / 0.9369 (0.9409) | 0.6124 / 0.9398 (0.9398) |
+| 4 | 0.6475 / 0.9534 (0.9490) | 0.5787 / 0.9114 (0.9114) |
+
+LLM selector fold 0 (Qwen2.5-7B LoRA, `logs/sel_f0.log`): CHECKPOINT step 150 dev acc 0.655, step 300 0.720, vs ranker 0.605 on the same 200 dev terms; left running to completion (476 steps).
+
 ## Locked configuration
 Base SapBERT + lexical/word-vector retrieval + training memory → LambdaRank → cross-encoder blend (w=0.3, top-15), LLM off.
 CV5: ICD 0.658, SNOMED 0.604 (#8).
