@@ -117,6 +117,26 @@ LLM selector fold 0 (Qwen2.5-7B LoRA, `logs/sel_f0.log`): CHECKPOINT step 150 de
 
 **Selector decision: keep** (rule: FINAL ≥ +2 pt on both systems; it is +4.4 / +8.0). Caveat: this is one fold only. The selector is trained per fold (~72 min on the A6000, cannot share the card with CE training), so folds 1–4 do not have it yet; the 5-fold run below is v2 *without* the selector.
 
+### v2 5-fold (s3 + s5, no selector; `logs/v2_cv5.log`, `logs/v2_vs_run9.txt`)
+All 10 s3 blend gates PASS (blend ≥ ranker on every fold and system). The stacker is fitted leave-one-fold-out.
+
+| Fold | ICD ranker / blend 0.3 / FINAL | SNOMED ranker / blend 0.3 / FINAL |
+|---|---|---|
+| 0 | 0.6408 / 0.6696 / 0.6674 | 0.5778 / 0.6074 / 0.6167 |
+| 1 | 0.6505 / 0.6659 / 0.6615 | 0.5958 / 0.6398 / 0.6379 |
+| 2 | 0.6193 / 0.6411 / 0.6411 | 0.5615 / 0.5923 / 0.5865 |
+| 3 | 0.6721 / 0.6762 / 0.6802 | 0.6124 / 0.6460 / 0.6496 |
+| 4 | 0.6475 / 0.6807 / 0.6741 | 0.5787 / 0.6058 / 0.6148 |
+
+| # | Pooled 5-fold (n = 2305 ICD / 2700 SNOMED) | ICD | SNOMED | Headline (min) |
+|---|---|---|---|---|
+| V3 | v2 FINAL exact (seen / unseen) | **0.6651** (0.739 / 0.431) | **0.6215** (0.740 / 0.495) | **0.6215** |
+| V3 | gold in candidates | 0.919 | 0.889 | |
+| V3 | compare vs #9 (paired, McNemar) | 0.6538 → 0.6651, **+1.13** [−0.17, +2.39], p=0.096 | 0.6056 → 0.6215, **+1.59** [+0.41, +2.78], p=0.010 (significant) | 0.6056 → 0.6215 |
+| V3 | slices seen / unseen | +1.14 (p=0.13) / +1.09 (p=0.54) | +1.58 (p=0.067) / +1.61 (p=0.085) | |
+
+**Ship decision: v2.** Pooled headline 0.6215 ≥ the locked 0.604 (the rule only blocks ≥ 1 pt below). In fold 0 the leave-one-fold-out stacker without the selector gives 0.6674 / 0.6167, vs 0.6718 / 0.6056 for the in-fold cross-fit (G4).
+
 ## Locked configuration
 Base SapBERT + lexical/word-vector retrieval + training memory → LambdaRank → cross-encoder blend (w=0.3, top-15), LLM off.
 CV5: ICD 0.658, SNOMED 0.604 (#8).
