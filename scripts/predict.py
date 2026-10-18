@@ -9,17 +9,18 @@ dictionaries). --details writes confidences and top-5 alternatives for error ana
 from __future__ import annotations
 
 import argparse
+import os
 import time
 
 from termmap import config, data
 from termmap.engine import TermMapEngine
 
 
-def get_engine(refit: bool = False) -> TermMapEngine:
-    path = config.CACHE_DIR / "engine.joblib"
-    if path.exists() and not refit:
+def get_engine(refit: bool = False, path=None, train=None) -> TermMapEngine:
+    path = path or config.CACHE_DIR / "engine.joblib"
+    if os.path.exists(path) and not refit:
         return TermMapEngine.load(path)
-    eng = TermMapEngine().fit(data.load_train())
+    eng = TermMapEngine().fit(data.load_train(train))
     eng.save(path)
     return eng
 
@@ -33,10 +34,12 @@ def main():
                     help="LoRA selector adapter dir (scripts/train_selector.py); used with an exported stacker")
     ap.add_argument("--llm", action="store_true", help="experimental: adjudicate low-confidence terms with LLM_PROVIDER")
     ap.add_argument("--refit", action="store_true", help="retrain on the training file instead of using the cache")
+    ap.add_argument("--engine", default=None, help="engine file to load / save (default data/cache/engine.joblib)")
+    ap.add_argument("--train", default=None, help="labelled training file (default hackathon_train.csv)")
     args = ap.parse_args()
 
     items = data.read_input(args.input)
-    eng = get_engine(args.refit)
+    eng = get_engine(args.refit, args.engine, args.train)
     if args.selector:
         from termmap.selector import Selector
         eng.selector_model = Selector(args.selector)

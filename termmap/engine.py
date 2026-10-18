@@ -715,19 +715,29 @@ class TermMapEngine:
             out[f"{col}_top{top_n}"] = alts
         return out
 
+    @staticmethod
+    def _ce_dir(path, system: str):
+        """Cross-encoder weights live next to the engine file (engine.joblib keeps the historical names)."""
+        from pathlib import Path
+
+        path = Path(path)
+        name = f"engine_ce_{system}" if path.name == "engine.joblib" else f"{path.stem}_ce_{system}"
+        return path.parent / name
+
     def save(self, path=None):
         path = path or config.CACHE_DIR / "engine.joblib"
         joblib.dump({"memory": self.memory, "ranker": self.ranker, "ce_systems": sorted(self.ce)}, path)
         for system, ce in self.ce.items():
-            ce.save(config.CACHE_DIR / f"engine_ce_{system}")
+            ce.save(self._ce_dir(path, system))
 
     @classmethod
     def load(cls, path=None) -> "TermMapEngine":
         from .cross_encoder import CrossEncoder
 
         eng = cls()
-        state = joblib.load(path or config.CACHE_DIR / "engine.joblib")
+        path = path or config.CACHE_DIR / "engine.joblib"
+        state = joblib.load(path)
         eng.memory, eng.ranker = state["memory"], state["ranker"]
         for system in state.get("ce_systems", []):
-            eng.ce[system] = CrossEncoder(str(config.CACHE_DIR / f"engine_ce_{system}"))
+            eng.ce[system] = CrossEncoder(str(cls._ce_dir(path, system)))
         return eng
