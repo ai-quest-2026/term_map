@@ -1,6 +1,6 @@
 # TermMap: mapping clinical terms to ICD-10-CM and SNOMED CT
 
-*Team submission write-up. Every number is reproducible with the commands in the README; the full experiment log is in `docs/experiments.md`. Demo video: DEMO_VIDEO_LINK · Model weights: HF_LINK*
+*Team submission write-up. Every number is reproducible with the commands in the README; the full experiment log is in `docs/experiments.md`. Demo video: DEMO_VIDEO_LINK · Model weights: https://huggingface.co/vatsal-afk/termmap-weights*
 
 ## 1. Approach: the problem and how we framed it
 Each input is an extracted clinical entity plus the chunk of chart text around it. The output is one ICD-10-CM code and one SNOMED CT concept, both from the supplied dictionaries (98k ICD codes; 382k SNOMED concepts, 985k descriptions).

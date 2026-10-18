@@ -42,7 +42,7 @@ Tested on WSL2 Ubuntu with one RTX A6000 (48 GB), Python 3.14.4. The CPU path wo
 | **No LLM** (omit `--selector`) | any GPU, or CPU (slower) | retrieval + ranker + cross-encoder + stacker | blind fold 0: ICD 0.645 / SNOMED 0.615 (stacker caveat applies) (5-fold CV of v2 with a stacker fitted without the selector: 0.665 / 0.622) |
 | **API LLM** (omit `--selector`, add `--llm`) | any machine + an LLM endpoint | the no-LLM engine, plus a prompted LLM that re-picks among the top 15 candidates for terms below 0.8 confidence | not the shipped configuration (see below) |
 
-- **No API keys and no hosted LLM.** The "local LLM" is the open-weight `Qwen/Qwen2.5-7B-Instruct` (Apache-2.0), which downloads automatically from Hugging Face on first use (~15 GB), plus our LoRA adapter and stackers from Hugging Face (`HF_REPO`, see below). After the first download the run is fully offline (`HF_HUB_OFFLINE=1`).
+- **No API keys and no hosted LLM.** The "local LLM" is the open-weight `Qwen/Qwen2.5-7B-Instruct` (Apache-2.0), which downloads automatically from Hugging Face on first use (~15 GB), plus our LoRA adapter and stackers from Hugging Face (`vatsal-afk/termmap-weights`, see below). After the first download the run is fully offline (`HF_HUB_OFFLINE=1`).
 - **Steps:**
   1. clone the repo;
   2. run `bash scripts/setup.sh --ingest --with-sapbert` and `pip install -r requirements-gpu.txt`;
@@ -69,10 +69,10 @@ How this mode behaves:
 
 ## Reproduce the submitted predictions (one command)
 
-**Trained weights (Hugging Face: https://huggingface.co/HF_REPO).** The LoRA selector adapter, the two stackers and the two fine-tuned cross-encoders. The engine file itself (`engine.joblib`) is not published, because it embeds training terms; step 4 above rebuilds it from the training file.
+**Trained weights (Hugging Face: https://huggingface.co/vatsal-afk/termmap-weights).** The LoRA selector adapter, the two stackers and the two fine-tuned cross-encoders. The engine file itself (`engine.joblib`) is not published, because it embeds training terms; step 4 above rebuilds it from the training file.
 
 ```bash
-huggingface-cli download HF_REPO --local-dir hf_weights
+hf download vatsal-afk/termmap-weights --local-dir hf_weights
 mkdir -p data/cache/stages/v2 && cp -r hf_weights/selector_f0 data/cache/stages/v2/ && cp hf_weights/stacker_*.joblib data/cache/
 ```
 
