@@ -230,18 +230,28 @@ def stage_s3(run: Run, fold: int, args) -> None:
         log(f"s3 fold {fold} [{system}] cross-encoder: {len(tr_g)} train / {len(dev_g)} dev groups, k={args.ce_k}, "
             f"{args.ce_epochs} epochs")
         t0 = time.time()
-        try:
-            ce = CrossEncoder().fit(tr_g, epochs=args.ce_epochs, dev=dev_g,
-                                    min_dev_after_first=None if args.no_gate else args.ce_gate, tag=f" f{fold} {system}")
-        except RuntimeError as e:  # epoch-1 gate: the model is not learning
-            gate(False, f"s3 fold {fold} {system}: {e}", args)
-            raise
+        ckpt = run.cache / f"ce_f{fold}_{system}_k{args.ce_k}"
+        if (ckpt / "config.json").exists() and not args.force:
+            # Trained earlier (e.g. a run that crashed while scoring): reuse it instead of retraining.
+            log(f"s3 fold {fold} [{system}] loading trained cross-encoder from {ckpt}")
+            ce = CrossEncoder(str(ckpt))
+            hist_file = ckpt / "history.json"
+            ce.history = json.loads(hist_file.read_text()) if hist_file.exists() else []
+        else:
+            try:
+                ce = CrossEncoder().fit(tr_g, epochs=args.ce_epochs, dev=dev_g,
+                                        min_dev_after_first=None if args.no_gate else args.ce_gate,
+                                        tag=f" f{fold} {system}")
+            except RuntimeError as e:  # epoch-1 gate: the model is not learning
+                gate(False, f"s3 fold {fold} {system}: {e}", args)
+                raise
+            ce.save(ckpt)  # checkpoint before scoring: a later crash costs minutes, not the training
+            (ckpt / "history.json").write_text(json.dumps(ce.history))
+            log(f"s3 fold {fold} [{system}] checkpoint saved: {ckpt}")
         tt = test.sort_values(["item", "score", "code"], ascending=[True, False, True]).groupby("item").head(args.ce_k)
         qs = {i: query_text(items.entity[i], items.chunk_text[i]) for i in tt.item.unique()}
         tt = tt.assign(ce=ce.score([qs[i] for i in tt.item], [candidate_text(c, cs) for c in tt.code]))
         run.save(tt[["item", "code", "ce"]], "ce", fold, system)
-        if args.save_models:
-            ce.save(run.cache / f"ce_f{fold}_{system}")
         n = len(items)
         F = stack_frame(tt.assign(prob=tt.prob))
         res = {"train_s": round(time.time() - t0, 1), "history": ce.history,

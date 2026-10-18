@@ -145,10 +145,28 @@ class CrossEncoder:
                     best_state = {k: v.detach().to("cpu", copy=True) for k, v in self.model.state_dict().items()}
         if best_state is not None:
             self.model.load_state_dict(best_state)
+        # Release training state before scoring (an optimizer + grads left on the GPU preceded a cuBLAS
+        # internal error when scoring right after training on the WSL box).
+        self.model.zero_grad(set_to_none=True)
+        del opt, sched, best_state
+        if self.device == "cuda":
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
         self.model.eval()
         return self
 
     def score(self, queries: list[str], cands: list[str], batch: int = 256) -> np.ndarray:
+        try:
+            return self._score(queries, cands, batch)
+        except RuntimeError as e:  # transient CUDA/cuBLAS failure: free the cache, retry once with small batches
+            if self.device != "cuda":
+                raise
+            print(f"  [ce] scoring failed ({str(e).splitlines()[0][:120]}); retrying with batch {batch // 4}", flush=True)
+            self.torch.cuda.synchronize()
+            self.torch.cuda.empty_cache()
+            return self._score(queries, cands, max(16, batch // 4))
+
+    def _score(self, queries: list[str], cands: list[str], batch: int) -> np.ndarray:
         out = []
         self.model.eval()
         with self.torch.inference_mode():
