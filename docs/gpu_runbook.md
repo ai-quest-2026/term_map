@@ -37,8 +37,9 @@ changed texts. Watch for:
 ```bash
 python -m scripts.pipeline --run v2 --folds 0 --stages s3 2>&1 | tee logs/v2_s3_f0.log
 ```
-- Prints dev accuracy after **every epoch**. **Gate:** epoch-1 dev accuracy must be ≥ 0.45, otherwise training aborts
-  within minutes. For reference, CE v1 alone was 0.48 / 0.50.
+- Prints dev accuracy after **every epoch**. **Gate:** epoch-1 dev accuracy must be ≥ 0.15 (chance on 30 candidates is 0.033); below that the model is
+  not learning and training aborts within minutes. `--no-gate` disables this check too. Whether the cross-encoder
+  helps is decided by the next gate.
 - Then prints: `gold@30`, `ranker`, `ce`, `blend0.3`, `best_blend`. **Gate:** best blend ≥ ranker.
 - Optional, comparing a different starting model on the *same* candidate lists:
   ```bash

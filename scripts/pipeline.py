@@ -230,8 +230,12 @@ def stage_s3(run: Run, fold: int, args) -> None:
         log(f"s3 fold {fold} [{system}] cross-encoder: {len(tr_g)} train / {len(dev_g)} dev groups, k={args.ce_k}, "
             f"{args.ce_epochs} epochs")
         t0 = time.time()
-        ce = CrossEncoder().fit(tr_g, epochs=args.ce_epochs, dev=dev_g, min_dev_after_first=args.ce_gate,
-                                tag=f" f{fold} {system}")
+        try:
+            ce = CrossEncoder().fit(tr_g, epochs=args.ce_epochs, dev=dev_g,
+                                    min_dev_after_first=None if args.no_gate else args.ce_gate, tag=f" f{fold} {system}")
+        except RuntimeError as e:  # epoch-1 gate: the model is not learning
+            gate(False, f"s3 fold {fold} {system}: {e}", args)
+            raise
         tt = test.sort_values(["item", "score", "code"], ascending=[True, False, True]).groupby("item").head(args.ce_k)
         qs = {i: query_text(items.entity[i], items.chunk_text[i]) for i in tt.item.unique()}
         tt = tt.assign(ce=ce.score([qs[i] for i in tt.item], [candidate_text(c, cs) for c in tt.code]))
@@ -354,7 +358,9 @@ def main():
     ap.add_argument("--baseline-run", default=None)
     ap.add_argument("--ce-k", type=int, default=CE_K)
     ap.add_argument("--ce-epochs", type=int, default=int(os.environ.get("TERMMAP_CE_EPOCHS", "4")))
-    ap.add_argument("--ce-gate", type=float, default=0.45, help="min cross-encoder dev accuracy after epoch 1")
+    ap.add_argument("--ce-gate", type=float, default=0.15,
+                    help="min cross-encoder dev accuracy after epoch 1; catches a model that is not learning "
+                         "(chance on k=30 lists is 0.033). Whether it helps is decided by the blend gate.")
     ap.add_argument("--s3-margin", type=float, default=0.0, help="required gain of the best blend over the ranker")
     ap.add_argument("--save-models", action="store_true")
     ap.add_argument("--with-selector", action="store_true", help="s5: use the LLM selector feature (folds with s4 caches)")
