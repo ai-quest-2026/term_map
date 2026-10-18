@@ -48,11 +48,11 @@ ABBREVIATIONS: dict[str, list[str]] = {
     "rbbb": ["right bundle branch block"], "svt": ["supraventricular tachycardia"], "vt": ["ventricular tachycardia"],
     "sss": ["sick sinus syndrome"], "pna": ["pneumonia"], "cap": ["community acquired pneumonia"], "ards": ["acute respiratory distress syndrome"],
     "ild": ["interstitial lung disease"], "ckd3": ["chronic kidney disease stage 3"], "ugib": ["upper gastrointestinal hemorrhage"],
-    "lgib": ["lower gastrointestinal hemorrhage"], "sbo": ["small bowel obstruction"], "hcc": ["hepatocellular carcinoma"],
+    "lgib": ["lower gastrointestinal hemorrhage"], "sbo": ["small bowel obstruction"],
     "hsv": ["herpes simplex"], "hiv": ["human immunodeficiency virus infection"], "hcv": ["hepatitis c"], "hbv": ["hepatitis b"],
     "ra/oa": ["rheumatoid arthritis", "osteoarthritis"], "ckd/esrd": ["chronic kidney disease"], "vit d def": ["vitamin d deficiency"],
     "ida": ["iron deficiency anemia"], "itp": ["immune thrombocytopenic purpura"], "dvt/pe": ["deep vein thrombosis"],
-    "ln": ["lymph node"], "oe": ["otitis externa"], "om": ["otitis media"], "uc": ["ulcerative colitis"], "cd": ["crohn disease"],
+    "ln": ["lymph node"], "oe": ["otitis externa"], "uc": ["ulcerative colitis"], "cd": ["crohn disease"],
     "nash": ["nonalcoholic steatohepatitis"], "tbi": ["traumatic brain injury"], "sah": ["subarachnoid hemorrhage"],
     "ich": ["intracerebral hemorrhage"], "sdh": ["subdural hemorrhage"], "pud": ["peptic ulcer disease"], "abd": ["abdominal"],
     "w/": ["with"], "w/o": ["without"], "b/l": ["bilateral"], "bilat": ["bilateral"], "lt": ["left"], "rt": ["right"],
@@ -64,12 +64,18 @@ ABBREVIATIONS: dict[str, list[str]] = {
     "lm": ["left main coronary artery"], "lmca": ["left main coronary artery"], "mlad": ["mid left anterior descending artery"],
     "plad": ["proximal left anterior descending artery"], "dlad": ["distal left anterior descending artery"],
     "ladd1": ["first diagonal branch of left anterior descending artery"], "d1": ["first diagonal branch"],
-    "om": ["obtuse marginal branch", "otitis media"], "om1": ["first obtuse marginal branch"],
+    "om": ["otitis media", "obtuse marginal branch"], "om1": ["first obtuse marginal branch"],
     "pda": ["posterior descending artery", "patent ductus arteriosus"], "lv": ["left ventricle"], "rv": ["right ventricle"],
     "lvef": ["left ventricular ejection fraction"], "bp": ["blood pressure"], "hr": ["heart rate"],
     "v/d": ["vomiting and diarrhea"], "n/v/d": ["nausea vomiting and diarrhea"], "tb": ["tuberculosis", "theraband"],
-    "hcc": ["hierarchical condition category", "hepatocellular carcinoma"],
+    # Alone, "hcc" is hepatocellular carcinoma; as a trailing tag ("acute cor pulmonale (hcc)") it is the EHR's
+    # hierarchical-condition-category flag and is stripped by expansions().
+    "hcc": ["hepatocellular carcinoma"],
 }
+# Keys spanning several tokens or containing "/" ("s/p", "gi bleed", "vit d def") are matched as phrases.
+_PHRASE_KEYS = sorted((k for k in ABBREVIATIONS if " " in k or "/" in k), key=len, reverse=True)
+_PHRASE_RES = [(re.compile(r"(?<![a-z0-9])" + re.escape(k) + r"(?![a-z0-9])"), k) for k in _PHRASE_KEYS]
+_TRAILING_FLAGS_RE = re.compile(r"\s*\(?\b(hcc|cms[- ]?hcc)\b\)?\s*$")
 ABBREVIATIONS["lad"] = ["lymphadenopathy", "left anterior descending artery"]
 
 _LATERALITY = {
@@ -97,8 +103,14 @@ def tokens(text: str) -> list[str]:
 def expansions(entity: str) -> list[str]:
     """Return alternative query strings: the normalized entity plus abbreviation-expanded variants."""
     raw = str(entity).lower().strip()
+    stripped = _TRAILING_FLAGS_RE.sub("", raw).strip()
+    if stripped and stripped != raw:  # "acute cor pulmonale (hcc)": the HCC flag is not part of the term
+        raw = stripped
     norm = basic(raw)
     out = [norm]
+    for rx, k in _PHRASE_RES:  # phrase abbreviations inside longer terms: "s/p appendectomy", "h/o gi bleed"
+        if raw != k and rx.search(raw):
+            out.append(rx.sub(ABBREVIATIONS[k][0], raw))
     if raw in ABBREVIATIONS:
         out += ABBREVIATIONS[raw]
     if norm in ABBREVIATIONS:

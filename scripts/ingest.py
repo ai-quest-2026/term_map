@@ -15,7 +15,7 @@ from termmap.sources import cdc_icd10cm, obo, snomed_icd_map
 
 def _invalidate_indexes():
     for system in config.SYSTEMS:
-        (config.CACHE_DIR / f"codesystem_{system}.joblib").unlink(missing_ok=True)
+        (config.CACHE_DIR / f"codesystem_{system}_{config.CACHE_VERSION}.joblib").unlink(missing_ok=True)
     (config.CACHE_DIR / "engine.joblib").unlink(missing_ok=True)
 
 

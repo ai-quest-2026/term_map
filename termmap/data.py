@@ -11,6 +11,21 @@ from . import config
 
 # Semantic tag at the end of a SNOMED fully specified name, e.g. "Diabetes mellitus (disorder)".
 _TAG_RE = re.compile(r"\s\(([a-z][a-z /\-]+)\)$", re.I)
+# SNOMED CT semantic tags. Only these count as an FSN tag: synonyms can also end in a parenthetical
+# ("... (helicobacter pylori)", "... (combined site)"), which is not the concept's semantic tag.
+SEMANTIC_TAGS = {
+    "disorder", "finding", "procedure", "body structure", "organism", "substance", "physical object",
+    "observable entity", "qualifier value", "medicinal product", "clinical drug", "medicinal product form",
+    "situation", "morphologic abnormality", "occupation", "event", "regime/therapy", "specimen",
+    "assessment scale", "product", "environment", "attribute", "cell", "geographic location",
+    "navigational concept", "record artifact", "cell structure", "person", "dose form", "disposition",
+    "namespace concept", "foundation metadata concept", "religion/philosophy", "physical force", "tumor staging",
+    "role", "property", "contextual qualifier", "basic dose form", "core metadata concept", "unit of presentation",
+    "staging scale", "intended site", "social concept", "administration method", "racial group", "ethnic group",
+    "link assertion", "linkage concept", "transformation", "release characteristic", "state of matter",
+    "owl metadata concept", "life style", "environment / location", "inactive concept", "supplier",
+    "real clinical drug", "packaged clinical drug", "special concept", "metadata", "number",
+}
 
 
 def _cached(name: str, build) -> pd.DataFrame:
@@ -80,17 +95,19 @@ def load_snomed() -> pd.DataFrame:
         df.columns = ["code", "description", "order"]
         df = df.dropna(subset=["code", "description"])
         df["order"] = pd.to_numeric(df.order, errors="coerce").fillna(99).astype(int)
+        df = df.reset_index(drop=True)
         tag = df.description.str.extract(_TAG_RE)[0].str.lower()
-        # The FSN is the last description carrying a semantic tag.
-        fsn_tag = tag.groupby(df.code).agg(lambda s: s.dropna().iloc[-1] if s.notna().any() else "")
-        df["tag"] = df.code.map(fsn_tag).fillna("")
-        is_fsn = tag.notna() & (tag == df.tag)
-        df["is_fsn"] = is_fsn
-        df.loc[is_fsn, "description"] = df.loc[is_fsn, "description"].str.replace(_TAG_RE, "", regex=True)
+        tag = tag.where(tag.isin(SEMANTIC_TAGS))
+        # The FSN is the highest-order description ending in a real semantic tag.
+        fsn = df[tag.notna()].assign(_tag=tag[tag.notna()]).sort_values(["code", "order"], kind="stable")
+        fsn = fsn.groupby("code").tail(1)
+        df["tag"] = df.code.map(dict(zip(fsn.code, fsn._tag))).fillna("")
+        df["is_fsn"] = df.index.isin(fsn.index)
+        df.loc[df.is_fsn, "description"] = df.loc[df.is_fsn, "description"].str.replace(_TAG_RE, "", regex=True)
         df = df.drop_duplicates(["code", "description"])
         return df.reset_index(drop=True)
 
-    return _cached("snomed", build)
+    return _cached("snomed_v2", build)
 
 
 def snomed_index_rows() -> pd.DataFrame:
@@ -103,15 +120,32 @@ def icd_index_rows() -> pd.DataFrame:
     return df[~df.is_range].reset_index(drop=True)
 
 
+# Short-form words of the CMS abbreviated descriptions ("Oth symptoms...", "Unsp fracture ..., init").
+_ICD_SHORT_RE = re.compile(r"\b(?:oth|unsp|init|subs|sqla|encntr|nondisp|displ|w|w/o|fx|sys)\b", re.I)
+
+
+def _icd_display(descs: list[str]) -> str:
+    """The full official wording among a code's descriptions: not abbreviated, not an index 'NOS' alias."""
+    return max(descs, key=lambda d: (not _ICD_SHORT_RE.search(d), not d.endswith(" NOS"), len(d)))
+
+
 @lru_cache(maxsize=1)
 def preferred_terms() -> dict[str, dict[str, str]]:
-    """code -> a human-readable display (first description) per system."""
+    """code -> a human-readable display per system. ICD: the CDC tabular long description when ingested
+    (scripts/ingest.py cdc), else the full official wording among the dictionary rows (the first row is
+    often the abbreviated short description). SNOMED: the first synonym, else the FSN."""
     icd = load_icd()
-    icd = icd[~icd.is_range].drop_duplicates("code")
+    icd = icd[~icd.is_range]
+    icd_pref = icd.groupby("code").description.agg(lambda s: _icd_display(list(s))).to_dict()
+    tab = config.EXTERNAL_DIR / "icd10cm_tabular_2026.parquet"
+    if tab.exists():
+        t = pd.read_parquet(tab)
+        t = t[(t.kind == "desc") & t.code.isin(icd_pref)].drop_duplicates("code")
+        icd_pref.update(zip(t.code, t.text))
     sn = load_snomed().sort_values(["code", "order"])
     sn_pref = sn[~sn.is_fsn].drop_duplicates("code")
     sn_pref = pd.concat([sn_pref, sn.drop_duplicates("code")]).drop_duplicates("code")
     return {
-        config.ICD: dict(zip(icd.code, icd.description)),
+        config.ICD: icd_pref,
         config.SNOMED: dict(zip(sn_pref.code, sn_pref.description)),
     }

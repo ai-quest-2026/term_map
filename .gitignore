@@ -6,3 +6,5 @@ data/external/
 reports/*.csv
 !reports/.gitkeep
 .venv/
+reports/stages/
+logs/

@@ -219,13 +219,19 @@ class SapbertIndex:
         names = config.CACHE_DIR / f"sapbert_{name}.json"
         if name is None:
             mat = sapbert().encode_cached(uniq)
-        elif path.exists() and names.exists() and json.loads(names.read_text()) == uniq:
-            mat = np.load(path)
         else:
-            print(f"encoding {len(uniq)} {name} texts with SapBERT (one-time)...", flush=True)
-            mat = sapbert().encode(uniq, log_every=200)
-            np.save(path, mat)
-            names.write_text(json.dumps(uniq))
+            old = json.loads(names.read_text()) if path.exists() and names.exists() else []
+            if old == uniq:
+                mat = np.load(path)
+            else:
+                # Reuse vectors of texts encoded before (dictionary fixes change only a few texts).
+                prev = dict(zip(old, np.load(path))) if old else {}
+                todo = [t for t in uniq if t not in prev]
+                print(f"encoding {len(todo)} new of {len(uniq)} {name} texts with SapBERT...", flush=True)
+                new = dict(zip(todo, sapbert().encode(todo, log_every=200)))
+                mat = np.stack([prev[t] if t in prev else new[t] for t in uniq]).astype(np.float16)
+                np.save(path, mat)
+                names.write_text(json.dumps(uniq))
         self.name = name
         self.texts = np.array(uniq, dtype=object)
         self.mat = mat.astype(np.float32)  # float32 for BLAS matmul; float16 on disk

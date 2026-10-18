@@ -37,6 +37,8 @@ SNOMED = "SNOMEDCT_US"
 SYSTEMS = (ICD, SNOMED)
 
 SEED = 13
+# Bump when dictionary parsing / indexing changes, so cached CodeSystem pickles are rebuilt.
+CACHE_VERSION = "v2"
 # Bit-reproducible cuBLAS on GPU; must be set before CUDA initialises, so it lives here (imported first).
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
@@ -46,7 +48,7 @@ SNOMED_EXCLUDED_TAGS = {
     "medicinal product", "clinical drug", "medicinal product form", "product",
     "real clinical drug", "packaged clinical drug", "cell", "cell structure",
     "geographic location", "navigational concept", "namespace concept", "linkage concept",
-    "attribute", "core metadata concept", "foundation metadata concept", "OWL metadata concept",
+    "attribute", "core metadata concept", "foundation metadata concept", "owl metadata concept",
     "specimen", "occupation", "person", "ethnic group", "racial group", "religion/philosophy",
     "social concept", "life style", "environment", "environment / location", "inactive concept",
     "record artifact", "staging scale", "tumor staging", "unit of presentation", "basic dose form",
