@@ -142,6 +142,16 @@ All 10 s3 blend gates PASS (blend ≥ ranker on every fold and system). The stac
 - Stacker re-exported **with** the selector feature (`s5 --folds 0 --with-selector --export-stacker`, fitted on fold 0's 991 terms; `logs/v2_s5_export_sel.log`). This is the last export.
 - `python -m scripts.predict --input reports/sample_input.csv --output predictions.csv --details details.csv --selector data/cache/stages/v2/selector_f0`: **mapped 500 terms in 214.5 s** (second run 215.7 s), ≈ 0.43 s/term incl. loading Qwen2.5-7B. `cmp` of the two runs: **DETERMINISTIC**. No evaluation file other than the training file was present, so the input is `reports/sample_input.csv` (first 500 unique DiagnosisCode entity/chunk_text rows).
 
+### Blind test, fold 0 (`scripts/blind_test.py`, submission command on hidden-answer fold 0, engine refit on folds 1–4, selector_f0)
+| Variant | ICD exact (seen / unseen) | ICD acc@90% / @80% | SNOMED exact (seen / unseen) | SNOMED acc@90% / @80% | Headline | Time |
+|---|---|---|---|---|---|---|
+| with chunk text (`logs/blind_f0_sel.log`) | 0.7960 (0.872 / 0.570) | 0.842 / 0.875 | 0.7722 (0.846 / 0.698) | 0.817 / 0.852 | **0.7722** | mapped 576 terms in 231.5 s; 23.3 min incl. refit |
+| entity only, `--no-context --reuse` (`logs/blind_f0_sel_noctx.log`) | 0.7162 (0.792 / 0.491) | 0.778 / 0.826 | 0.6630 (0.746 / 0.578) | 0.718 / 0.762 | **0.6630** | mapped 576 terms in 213.7 s |
+
+Output schema OK in both (chunk_id, clinical_entity, icd10cm_code, snomed_code; 576/576 rows). ICD category 0.871 / 0.823.
+
+**Not a clean estimate: the blind headline is ~8 pt above the pipeline's cross-fitted fold-0 FINAL (0.716 / 0.685).** The exported stacker (LightGBM LambdaRank) was fitted on fold 0's own labelled candidate lists (the only fold with selector features), so in this test it has seen the gold of the very terms it scores. A gap this large is consistent with a tree model memorising those terms, not just "a few weights", so 0.796 / 0.772 is optimistic. The clean numbers remain the pipeline's 0.716 / 0.685. The blind test does validate the submission command end to end: it runs, the schema is right and accuracy is in a sane range. Without chunk text the shipped engine still scores 0.716 / 0.663, which is 8 / 11 pt below the with-context blind run. That drop is affected by the same stacker leakage, but it shows the context matters to this engine, unlike the first architecture (< 1 pt).
+
 ### JEV side experiment (hosted, not shipped)
 `scripts/llm_sidecar.py --run v2 --fold 0 --n 100` (`logs/jev_f0.log`, `reports/stages/jev_sidecar_v2_f0.json`): TypeSafe Jev (jev-1.13.0) picks among the v2 ranker's cached top-15, first 100 fold-0 test terms per system, 5 similar training terms in the state. Sends chart text to a third-party API, so it stays a side experiment.
 

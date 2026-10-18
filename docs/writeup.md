@@ -59,6 +59,7 @@ There is one deterministic command: `scripts/predict.py`. Seeds are fixed, Light
 
 *20% split. †One fold (451 ICD / 540 SNOMED terms); on the same fold v2 without the selector scores 0.667 / 0.617 and the baseline 0.656 / 0.607. The selector is trained per fold (~72 min on one A6000), so the 5-fold run measures v2 *without* it.
 
+- **End-to-end check of the submission command (blind fold 0):** answers hidden, engine refit on folds 1–4, `scripts/predict.py` run as the judges would: schema OK, 576 terms in 231.5 s, ICD 0.796 / SNOMED 0.772. This is optimistic, because the shipped stacker was fitted on fold 0's labels; the clean fold-0 figures are 0.716 / 0.685. With the entity alone (no chunk text) it gives 0.716 / 0.663.
 - **v2 vs the baseline (paired over all 5,005 rows):** ICD +1.1 pt [−0.2, +2.4], p=0.10; SNOMED +1.6 pt [+0.4, +2.8], p=0.01.
 - **The selector vs the baseline on fold 0:** ICD +6.0 pt [+2.7, +9.3], SNOMED +7.8 pt [+4.3, +11.3], both p<0.001. The largest gain is on SNOMED codes unseen in training (+12.3 pt).
 - **Codes unseen in training (long tail), v2 5-fold:** ICD 0.431, SNOMED 0.495 (fold 0 with the selector: 0.474 / 0.605).
