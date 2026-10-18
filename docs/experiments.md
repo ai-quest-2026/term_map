@@ -148,9 +148,24 @@ All 10 s3 blend gates PASS (blend ≥ ranker on every fold and system). The stac
 | with chunk text (`logs/blind_f0_sel.log`) | 0.7960 (0.872 / 0.570) | 0.842 / 0.875 | 0.7722 (0.846 / 0.698) | 0.817 / 0.852 | **0.7722** | mapped 576 terms in 231.5 s; 23.3 min incl. refit |
 | entity only, `--no-context --reuse` (`logs/blind_f0_sel_noctx.log`) | 0.7162 (0.792 / 0.491) | 0.778 / 0.826 | 0.6630 (0.746 / 0.578) | 0.718 / 0.762 | **0.6630** | mapped 576 terms in 213.7 s |
 
-Output schema OK in both (chunk_id, clinical_entity, icd10cm_code, snomed_code; 576/576 rows). ICD category 0.871 / 0.823.
+| no LLM (omit `--selector`), exported stacker, sel_p NaN (`logs/blind_f0_nollm_stacker1.log`) | 0.6452 (0.733 / 0.386) | 0.690 / 0.740 | 0.6148 (0.713 / 0.515) | 0.656 / 0.708 | **0.6148** | mapped 576 terms in 71.6 s |
+| no LLM, `TERMMAP_STACKER=0` (0.7 / 0.3 ranker / CE blend; `logs/blind_f0_nollm_stacker0.log`) | 0.6718 (0.763 / 0.404) | 0.712 / 0.748 | 0.6093 (0.706 / 0.511) | 0.656 / 0.699 | 0.6093 | mapped 576 terms in 65.2 s |
+
+Output schema OK in all four (chunk_id, clinical_entity, icd10cm_code, snomed_code; 576/576 rows). No-LLM mode: the default (stacker with the selector feature missing) wins on the headline (0.6148 vs 0.6093), though the fixed blend is better on ICD (+2.7 pt). The stacker caveat applies to the default. ICD category 0.871 / 0.823.
 
 **Not a clean estimate: the blind headline is ~8 pt above the pipeline's cross-fitted fold-0 FINAL (0.716 / 0.685).** The exported stacker (LightGBM LambdaRank) was fitted on fold 0's own labelled candidate lists (the only fold with selector features), so in this test it has seen the gold of the very terms it scores. A gap this large is consistent with a tree model memorising those terms, not just "a few weights", so 0.796 / 0.772 is optimistic. The clean numbers remain the pipeline's 0.716 / 0.685. The blind test does validate the submission command end to end: it runs, the schema is right and accuracy is in a sane range. Without chunk text the shipped engine still scores 0.716 / 0.663, which is 8 / 11 pt below the with-context blind run. That drop is affected by the same stacker leakage, but it shows the context matters to this engine, unlike the first architecture (< 1 pt).
+
+### Partner ICD engine merge (fast path, partner's B2 validation split)
+Partner engine (ai-quest-2026/icd10-map-experiments, Phase-9 reranker) scored offline on its own B2 split with its own B2 caches (`scripts/partner_f0.py --their-split`, `logs/partner_b2.log`; no Gemini, API keys unset). Ours: pooled 5-fold out-of-fold v2 predictions without the selector; neither engine saw these rows in training. `scripts/partner_merge.py fit --fold all` (`logs/partner_merge_b2.log`), 462 ICD terms, all matched.
+
+| | ours (v2 OOF) | partner | note |
+|---|---|---|---|
+| exact | **0.6861** | 0.6147 | McNemar p=0.0007 (ours-only right 62, partner-only right 29) |
+| seen / unseen codes | 0.768 / 0.434 | 0.671 / 0.443 | |
+| agreement / oracle | 0.695 / 0.749 | | partner gold in its top 10: 0.857 |
+| switch rule "partner if ours conf < t and partner score ≥ u", cross-fitted | 0.6753 | | below ours alone, so **rule.json used=false** (never switch) |
+
+**Decision: no merge.** The submission keeps our ICD codes, and the combined dry run was not needed. The 5.9-pt oracle gap means the engines err differently, but a confidence-threshold switch cannot exploit it on 462 terms. The slow path (retraining the partner on our fold 0) was not run, for time.
 
 ### JEV side experiment (hosted, not shipped)
 `scripts/llm_sidecar.py --run v2 --fold 0 --n 100` (`logs/jev_f0.log`, `reports/stages/jev_sidecar_v2_f0.json`): TypeSafe Jev (jev-1.13.0) picks among the v2 ranker's cached top-15, first 100 fold-0 test terms per system, 5 similar training terms in the state. Sends chart text to a third-party API, so it stays a side experiment.
