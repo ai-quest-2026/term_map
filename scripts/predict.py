@@ -9,6 +9,7 @@ dictionaries). --details writes confidences and top-5 alternatives for error ana
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import time
 
@@ -39,6 +40,15 @@ def main():
     args = ap.parse_args()
 
     items = data.read_input(args.input)
+    if "chunk_id" not in items.columns:  # training-schema input: derive a stable id so the output keeps all 4 columns
+        items["chunk_id"] = [hashlib.md5(str(c).encode()).hexdigest()[:12] for c in items.chunk_text]
+    if args.selector:
+        from termmap.engine import stacker_path
+        missing = [str(p) for p in [os.path.join(args.selector, "selector.json")] + [stacker_path(s) for s in config.SYSTEMS]
+                   if not os.path.exists(p)]
+        if missing:
+            raise SystemExit("--selector needs the trained LoRA adapter and the two stackers; missing: " + ", ".join(missing)
+                             + ". Download them as described in the README (Hugging Face weights), or run without --selector.")
     eng = get_engine(args.refit, args.engine, args.train)
     if args.selector:
         from termmap.selector import Selector

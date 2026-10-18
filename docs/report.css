@@ -1,6 +1,6 @@
 /* Print style for the write-up PDF (scripts/make_report.sh). Compact enough to fit 2–3 A4 pages + references. */
 @page { size: A4; margin: 11mm 13mm; }
-html { font-size: 8.9pt; }
+html { font-size: 8.6pt; }
 body { font-family: "Liberation Sans", "DejaVu Sans", Arial, sans-serif; line-height: 1.32; color: #111; max-width: none; margin: 0; padding: 0; }
 header#title-block-header { display: none; }
 h1 { font-size: 15pt; margin: 0 0 3pt; }
@@ -13,7 +13,7 @@ th, td { border: 0.5pt solid #bbb; padding: 1.5pt 4pt; text-align: left; vertica
 th { background: #eef1f5; }
 code { font-family: "DejaVu Sans Mono", monospace; font-size: 8pt; }
 pre { font-size: 7.4pt; line-height: 1.2; background: #f6f8fa; padding: 4pt; margin: 4pt 0; white-space: pre-wrap; break-inside: avoid; }
-img { max-width: 100%; max-height: 92mm; display: block; margin: 4pt auto; }
+img { max-width: 100%; max-height: 82mm; display: block; margin: 4pt auto; }
 figure { margin: 4pt 0; break-inside: avoid; }
 figcaption { font-size: 8pt; color: #444; text-align: center; }
 a { color: #0b4f9c; text-decoration: none; }

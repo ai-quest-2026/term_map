@@ -42,15 +42,16 @@ Tested on WSL2 Ubuntu with one RTX A6000 (48 GB), Python 3.14.4. The CPU path wo
 | **No LLM** (omit `--selector`) | any GPU, or CPU (slower) | retrieval + ranker + cross-encoder + stacker | blind fold 0: ICD 0.645 / SNOMED 0.615 (stacker caveat applies) (5-fold CV of v2 with a stacker fitted without the selector: 0.665 / 0.622) |
 | **API LLM** (omit `--selector`, add `--llm`) | any machine + an LLM endpoint | the no-LLM engine, plus a prompted LLM that re-picks among the top 15 candidates for terms below 0.8 confidence | not the shipped configuration (see below) |
 
-- **No API keys and no hosted LLM.** The "local LLM" is the open-weight `Qwen/Qwen2.5-7B-Instruct` (Apache-2.0), which downloads automatically from Hugging Face on first use (~15 GB), plus our LoRA adapter (~tens of MB, in the artifact bundle). After the first download the run is fully offline (`HF_HUB_OFFLINE=1`).
+- **No API keys and no hosted LLM.** The "local LLM" is the open-weight `Qwen/Qwen2.5-7B-Instruct` (Apache-2.0), which downloads automatically from Hugging Face on first use (~15 GB), plus our LoRA adapter and stackers from Hugging Face (`HF_REPO`, see below). After the first download the run is fully offline (`HF_HUB_OFFLINE=1`).
 - **Steps:**
   1. clone the repo;
   2. run `bash scripts/setup.sh --ingest --with-sapbert` and `pip install -r requirements-gpu.txt`;
-  3. unpack the artifact bundle;
-  4. run the one command below.
+  3. download our trained weights from Hugging Face (below);
+  4. build the engine once from `hackathon_train.csv`, without the selector so cross-encoder training has the GPU to itself (~20 min on an A6000, deterministic): `python -m scripts.predict --refit --input eval.csv --output /tmp/warmup.csv`;
+  5. run the one command below.
 
-  No retraining is needed.
-- **The submitted `predictions.csv`** came from exactly this command, and the output is byte-identical across runs.
+  The LLM selector does not need retraining.
+- **The submitted `predictions.csv`** came from exactly this command. On our A6000 repeated runs are byte-identical; an engine rebuilt on different GPU hardware can differ on rare near-ties.
 - **Without a suitable GPU**, use the No-LLM mode (omit `--selector`). Its own, lower numbers are in the table above.
 
 **API LLM mode.** Set the endpoint in `.env`:
@@ -68,14 +69,21 @@ How this mode behaves:
 
 ## Reproduce the submitted predictions (one command)
 
-With the trained artifacts in `data/cache/` (from the artifact bundle, ARTIFACTS_LINK, unpacked at the repo root with `tar xzf termmap_artifacts.tgz`; or retrained as below):
+**Trained weights (Hugging Face: https://huggingface.co/HF_REPO).** The LoRA selector adapter, the two stackers and the two fine-tuned cross-encoders. The engine file itself (`engine.joblib`) is not published, because it embeds training terms; step 4 above rebuilds it from the training file.
+
+```bash
+huggingface-cli download HF_REPO --local-dir hf_weights
+mkdir -p data/cache/stages/v2 && cp -r hf_weights/selector_f0 data/cache/stages/v2/ && cp hf_weights/stacker_*.joblib data/cache/
+```
+
+Then:
 
 ```bash
 python -m scripts.predict --input eval.csv --output predictions.csv --details details.csv \
     --selector data/cache/stages/v2/selector_f0
 ```
 
-- Input: `chunk_id, clinical_entity[, chunk_text]` (problem schema) or `entity, chunk_text` (training schema).
+- Input: `chunk_id, clinical_entity[, chunk_text]` (problem schema) or `entity, chunk_text` (training schema; a `chunk_id` is then derived from the chunk text).
 - Output: `chunk_id, clinical_entity, icd10cm_code, snomed_code`, one row per input row. `details.csv` adds each code's display, confidence, margin and top-5 alternatives.
 - Deterministic: fixed seeds, deterministic GPU kernels, no sampling. Two runs on 500 terms give byte-identical output.
 - Speed (A6000): 500 terms in 214.5 s with the selector (≈ 0.43 s/term, including loading the 7B model), 32.7 s without it.
@@ -151,4 +159,4 @@ docs/      writeup.md + TermMap_writeup.pdf, architecture.mmd/.png, experiments.
 ```
 
 ## Data handling
-The dataset is proprietary. This repository is private, inference is fully offline, and per-row predictions, caches and logs are gitignored. The artifact bundle contains the engine's training-example memory, so it is shared only inside the challenge. The hosted-API experiments (Gemini, Jev) were small, labelled side tests and are not part of the engine.
+The dataset is proprietary. This repository is private, inference is fully offline, and per-row predictions, caches and logs are gitignored. The published weights contain no training text: `engine.joblib`, which embeds the training-example memory, is rebuilt locally and never published. The hosted-API experiments (Gemini, Jev) were small, labelled side tests and are not part of the engine.
