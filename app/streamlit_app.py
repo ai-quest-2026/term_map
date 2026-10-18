@@ -200,13 +200,6 @@ def code_card(row: pd.Series, s: str, review_below: float):
 
 # --------------------------------------------------------------------------- page
 st.title("TermMap: clinical term → ICD-10-CM + SNOMED CT")
-st.caption("Retrieval (TF-IDF, SapBERT, training memory, open ontologies) → LambdaRank → context cross-encoder → "
-           "local Qwen2.5-7B LoRA selector → stacker. Fully offline and deterministic.")
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("5-fold CV, no selector: ICD", "0.665")
-k2.metric("5-fold CV, no selector: SNOMED", "0.622")
-k3.metric("Fold 0, shipped (with selector): ICD", "0.716")
-k4.metric("Fold 0, shipped (with selector): SNOMED", "0.685")
 with st.sidebar:
     st.header("Engine")
     engine_path = st.text_input("engine file", str(config.CACHE_DIR / "engine.joblib"),
