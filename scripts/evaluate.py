@@ -42,7 +42,7 @@ def evaluate_fold(tr: pd.DataFrame, va: pd.DataFrame, args) -> pd.DataFrame:
         top = R.groupby("item").head(1).set_index("item")
         recall = R.groupby("item").label.max().reindex(items.index, fill_value=0)
         df = items.assign(system=system, pred=[top.code.get(i, "") for i in items.index],
-                          confidence=[float(top.prob.get(i, 0.0)) for i in items.index],
+                          confidence=[float(top.conf.get(i, 0.0)) for i in items.index],
                           llm=[int(top.llm.get(i, 0)) for i in items.index], in_candidates=recall.values,
                           seen=items.code.isin(set(diag_tr[diag_tr.coding_system == system].code)),
                           ms_per_term=1000 * (time.time() - t0) / max(len(items), 1))

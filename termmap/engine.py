@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
@@ -30,13 +31,26 @@ N_FOLDS = 5
 
 _NEG_WORDS = {"no", "absent", "negative", "without", "not"}
 _HIST_WORDS = {"history", "h", "o", "past"}
+# Most general billable codes under an ICD prefix: what a coder picks when the text supports nothing more.
+_GENERAL_RE = re.compile(r"unspecified|\bnos\b|without complication|^other\b", re.I)
 _SN_TAGS = ["disorder", "finding", "morphologic abnormality", "situation", "observable entity", "procedure",
             "body structure", "qualifier value", "event", "regime/therapy"]
 
 
 # --------------------------------------------------------------------------- dictionary side
 
-CE_K = 15                                                      # candidates the cross-encoder rescores
+CE_K = int(os.environ.get("TERMMAP_CE_K", "30"))              # candidates the cross-encoder rescores
+CE_EPOCHS = int(os.environ.get("TERMMAP_CE_EPOCHS", "4"))      # best epoch kept by inner-dev early stopping
+# Ranker capacity per system. ICD: 600 deep trees overfit (in-sample top-1 0.86 vs OOF 0.57); the regularised
+# ranker is +0.9 (split) / +1.5 (CV fold 0) points. SNOMED: the same regularisation cost 1.9 points on fold 0
+# (split: +0.4), so SNOMED keeps the original settings (docs/experiments.md, v2 ablations).
+RANKER_PARAMS = {
+    config.ICD: dict(n_estimators=400, learning_rate=0.02, num_leaves=15, min_child_samples=50,
+                     colsample_bytree=0.5, reg_lambda=10.0, subsample=0.8, subsample_freq=1),
+    config.SNOMED: {},
+}
+# Second-level features over each term's top-K: ranker and cross-encoder evidence (and the LLM selector's).
+STACK_FEATURES = ["lp_z", "ce_z", "lp_gap", "ce_gap", "rk_rank", "ce_rank", "lp", "sel_p", "sel_rank"]
 CE_WEIGHT = float(os.environ.get("TERMMAP_CE_WEIGHT", "0.3"))  # chosen on the split: 0.3 best for both systems
 LLM_GATE = float(os.environ.get("TERMMAP_LLM_GATE", "0.3"))    # LLM may only pick candidates with prob >= gate x top
 
@@ -93,6 +107,43 @@ class CodeSystem:
         self.retriever = DictionaryRetriever(texts, codes, dense_factory=DenseIndex)
         self.attach_sapbert()
 
+    def synonyms(self, code: str, n: int = 2, exclude: str = "") -> list[str]:
+        """Up to n other dictionary descriptions of a code (no abbreviated CMS short forms)."""
+        syn = getattr(self, "_syn", None)
+        if syn is None:
+            if self.system == config.ICD:
+                df = data.icd_index_rows()
+                df = df[~df.description.str.contains(data._ICD_SHORT_RE)]
+            else:
+                df = data.snomed_index_rows().sort_values(["code", "order"], kind="stable")
+            syn = df.groupby("code", sort=False).description.agg(list).to_dict()
+            self._syn = syn
+        seen, out = {basic(exclude)}, []
+        for d in syn.get(code, []):
+            b = basic(d)
+            if b not in seen:
+                seen.add(b)
+                out.append(d)
+                if len(out) == n:
+                    break
+        return out
+
+    def general_codes(self, prefix: str) -> list[str]:
+        """Most general leaves under an ICD prefix (category "K76" or subcategory "I71.0"), shortest code first:
+        wording "unspecified" / "NOS" / "without complications" / "Other ...", or a .9 / .x9 code."""
+        gen = getattr(self, "_general", None)
+        if gen is None:
+            df = data.icd_index_rows()
+            leaves = df[df.is_leaf]
+            ok = leaves.description.str.contains(_GENERAL_RE) | (leaves.code.str[-1].eq("9") & leaves.code.str.len().le(6))
+            gen = defaultdict(list)
+            for c in sorted(set(leaves.code[ok]), key=lambda c: (len(c), c)):
+                gen[c[:3]].append(c)
+                if len(c) > 5:
+                    gen[c[:5]].append(c)
+            self._general = gen
+        return gen.get(prefix, [])
+
     def attach_sapbert(self) -> bool:
         """Add the SapBERT index to the retriever (also to a cached CodeSystem built before torch was installed)."""
         r = self.retriever
@@ -106,7 +157,7 @@ class CodeSystem:
 
     @classmethod
     def load(cls, system: str) -> "CodeSystem":
-        path = config.CACHE_DIR / f"codesystem_{system}.joblib"
+        path = config.CACHE_DIR / f"codesystem_{system}_{config.CACHE_VERSION}.joblib"
         if path.exists():
             cs = joblib.load(path)
             if cs.attach_sapbert():
@@ -143,6 +194,11 @@ class Memory:
         self.cat_freq = Counter(c[:3] for c in diag.code) if system == config.ICD else Counter()
         self.n = max(len(diag), 1)
         self.diag_codes = Counter(diag.code)
+        # S0: a labelled term seen again verbatim (after normalisation) gets its gold code, when unambiguous.
+        seen: dict[str, Counter] = defaultdict(Counter)
+        for e, c in zip(diag.entity, diag.code):
+            seen[expansions(e)[0]][c] += 1
+        self.lookup = {k: next(iter(v)) for k, v in seen.items() if len(v) == 1}
         self._unspec_rate: dict[str, float] | None = None
         # Labelled diagnosis terms, used as few-shot examples of local coding convention for the LLM.
         self._ex = (list(diag.entity), list(diag.code))
@@ -290,12 +346,20 @@ def _gather(entity: str, chunk: str, cs: CodeSystem, mem: Memory, dict_hits, mem
         for code in icd_codes_in_text(entity):
             if code in cs.valid:
                 get(code).code_in_text = 1
-        # Specificity calibration: offer the "unspecified" leaves of the top categories, and the
-        # initial-encounter (7th character A) variant of injury codes retrieved as D/S encounters.
-        top = sorted(cands.values(), key=lambda c: -(c.d_char + c.m_char + c.d_dense))[:5]
-        for c in top:
-            for sib in cs.unspec_by_cat.get(c.code[:3], [])[:4]:
+        # Specificity calibration: offer the general codes ("unspecified", "NOS", ".9", "Other ...") of the
+        # categories and subcategories every source ranks highest, and the initial-encounter (7th character A)
+        # variant of injury codes retrieved as D/S encounters.
+        def best_rank(c):
+            return min(c.d_char_rank, c.d_word_rank, c.d_dense_rank, c.d_sap_rank, c.m_rank)
+
+        top = sorted(cands.values(), key=lambda c: (best_rank(c), -(c.d_char + c.m_char + c.d_dense + c.d_sap)))[:8]
+        for cat in dict.fromkeys(c.code[:3] for c in top):
+            for sib in cs.unspec_by_cat.get(cat, [])[:4] + cs.general_codes(cat)[:5]:
                 get(sib).hier = 1
+        for c in top[:5]:
+            if len(c.code) > 5:
+                for sib in cs.general_codes(c.code[:5])[:3]:
+                    get(sib).hier = 1
         # Version drift: gold labels sometimes use a parent code that a recent release split into
         # children (M51.36 -> M51.360/...). Offer the non-leaf parent of the top candidates.
         for c in top[:3]:
@@ -343,7 +407,9 @@ def _featurize(entity: str, chunk: str, cands: dict[str, Cand], cs: CodeSystem, 
             "d_word_rank": c.d_word_rank, "d_exact": c.d_exact, "m_char": c.m_char, "m_rank": c.m_rank,
             "m_votes": c.m_votes, "m_exact": c.m_exact, "from_expansion": c.from_expansion,
             "code_in_text": c.code_in_text, "hier": c.hier,
-            "freq": math.log1p(mem.freq.get(c.code, 0)), "cat_freq": math.log1p(mem.cat_freq.get(c.code[:3], 0)),
+            # per-1000 rates: OOF memories hold 4/5 of the data, the final memory all of it
+            "freq": math.log1p(1000 * mem.freq.get(c.code, 0) / mem.n),
+            "cat_freq": math.log1p(1000 * mem.cat_freq.get(c.code[:3], 0) / mem.n),
             "is_leaf": int(cs.is_leaf.get(c.code, True)), "unspec": int(c.code in cs.unspecified),
             "code_len": len(c.code), "n_desc": math.log1p(cs.n_desc.get(c.code, 0)),
             "jacc": inter / max(len(q_exp | dt), 1), "q_cov": len(qt & dt) / max(len(qt), 1),
@@ -366,7 +432,7 @@ def _featurize(entity: str, chunk: str, cands: dict[str, Cand], cs: CodeSystem, 
         })
     df = pd.DataFrame(rows)
     if len(df):
-        s = df.d_char + df.m_char + df.d_word
+        s = df.d_char + df.m_char + df.d_word + df.d_sap + df.m_sap
         df["rank_in_group"] = s.rank(ascending=False, method="first")
         df["score_gap"] = s.max() - s
     return df
@@ -376,13 +442,17 @@ def build_features(items: pd.DataFrame, cs: CodeSystem, mem: Memory) -> pd.DataF
     """items: DataFrame with entity, chunk_text (and optional gold `code`). Returns one row per candidate."""
     # Negated mentions also query the negative concept ("no nausea", "nausea absent"); SNOMED encodes
     # some negations as their own concepts, the ranker decides with the q_neg/d_neg features.
-    queries = [expansions(e) + ([f"no {basic(e)}", f"{basic(e)} absent"] if is_negated(e, c) else [])
+    neg_ok = cs.system == config.SNOMED  # ICD-10-CM has no negative concepts
+    queries = [expansions(e) + ([f"no {basic(e)}", f"{basic(e)} absent"] if neg_ok and is_negated(e, c) else [])
                for e, c in zip(items.entity, items.chunk_text)]
     flat = sorted({q for qs in queries for q in qs})
     dres = dict(zip(flat, cs.retriever.search(flat, K_DICT)))
     mres = dict(zip(flat, mem.search(flat, K_MEM)))
     parts = []
+    beat = int(os.environ.get("TERMMAP_PROGRESS", "0"))
     for i, (ent, chunk, qs) in enumerate(zip(items.entity, items.chunk_text, queries)):
+        if beat and i and i % beat == 0:
+            print(f"    [{cs.system}] features {i}/{len(items)}", flush=True)
         cands = _gather(ent, chunk, cs, mem, [dres[q] for q in qs], [mres[q] for q in qs], qs)
         f = _featurize(ent, chunk, cands, cs, mem)
         f.insert(0, "item", i)
@@ -394,6 +464,39 @@ def build_features(items: pd.DataFrame, cs: CodeSystem, mem: Memory) -> pd.DataF
     return out
 
 
+# --------------------------------------------------------------------------- second level
+
+def stack_frame(top: pd.DataFrame) -> pd.DataFrame:
+    """Features for the second-level ranker over each term's top-k (`prob`, `ce`, optional `sel_p`)."""
+    T = top.copy()
+    T["lp"] = np.log(T.prob.clip(lower=1e-12))
+    g = T.groupby("item", sort=False)
+    z = lambda c: (T[c] - g[c].transform("mean")) / (g[c].transform("std").fillna(0) + 1e-6)
+    T["lp_z"], T["ce_z"] = z("lp"), z("ce")
+    T["lp_gap"], T["ce_gap"] = T.lp - g.lp.transform("max"), T.ce - g.ce.transform("max")
+    T["rk_rank"] = g.lp.rank(ascending=False, method="first")
+    T["ce_rank"] = g.ce.rank(ascending=False, method="first")
+    if "sel_p" not in T.columns:
+        T["sel_p"] = np.nan
+    T["sel_rank"] = T.groupby("item", sort=False).sel_p.rank(ascending=False, method="first")
+    return T
+
+
+STACKER_PARAMS = dict(n_estimators=150, learning_rate=0.05, num_leaves=7, min_child_samples=30,
+                      colsample_bytree=1.0, reg_lambda=5.0)
+
+
+def stacker_path(system: str):
+    return config.CACHE_DIR / f"stacker_{system}.joblib"
+
+
+def load_stackers() -> dict:
+    """Second-level rankers exported by `scripts/pipeline.py --export-stacker` (TERMMAP_STACKER=0 ignores them)."""
+    if os.environ.get("TERMMAP_STACKER", "1") == "0":
+        return {}
+    return {s: joblib.load(stacker_path(s)) for s in config.SYSTEMS if stacker_path(s).exists()}
+
+
 # --------------------------------------------------------------------------- engine
 
 class TermMapEngine:
@@ -402,6 +505,8 @@ class TermMapEngine:
         self.memory: dict[str, Memory] = {}
         self.ranker: dict[str, Ranker] = {}
         self.ce: dict = {}
+        self.oof: dict[str, pd.DataFrame] = {}    # OOF training features + OOF ranker scores (pipeline caches)
+        self.stacker: dict[str, Ranker] = load_stackers()
 
     @staticmethod
     def _folds(train: pd.DataFrame, n: int = N_FOLDS) -> np.ndarray:
@@ -432,66 +537,119 @@ class TermMapEngine:
             out.update({f * 1_000_000 + i: (e, c) for i, (e, c) in enumerate(zip(rows.entity, rows.chunk_text))})
         return out
 
-    def fit(self, train: pd.DataFrame, verbose: bool = True, use_ce: bool | None = None) -> "TermMapEngine":
+    def fit(self, train: pd.DataFrame, verbose: bool = True, use_ce: bool | None = None,
+            ce_gate: float | None = None) -> "TermMapEngine":
         use_ce = ce_enabled() if use_ce is None else use_ce
         for system in self.systems:
             X = derive(self.oof_features(train, system))
             if verbose:
                 rec = X.groupby("item").label.max()
-                print(f"[{system}] OOF candidate recall: {rec.mean():.3f} ({len(rec)} items, {len(X)} rows)")
-            self.ranker[system] = Ranker(FEATURES + DERIVED).fit(X)
+                print(f"[{system}] OOF candidate recall: {rec.mean():.3f} ({len(rec)} items, {len(X)} rows)", flush=True)
+            self.ranker[system] = Ranker(FEATURES + DERIVED, **RANKER_PARAMS[system]).fit(X)
+            # Cross-fitted ranker scores: what the ranker says about a training term it was not trained on.
+            # Cross-encoder training lists come from these (the in-sample ranker puts gold first ~95% of
+            # the time, so a cross-encoder trained on its lists never sees the confusers it meets at test).
+            X["oof_rk"] = self._oof_ranker_scores(X, RANKER_PARAMS[system])
+            self.oof[system] = X
             self.memory[system] = Memory(train, system)
             if use_ce:
-                self.ce[system] = self._train_ce(train, system, X)
+                self.ce[system] = self._train_ce(train, system, X, gate=ce_gate)
         return self
 
-    def _train_ce(self, train, system, X):
-        """Cross-encoder on the ranker's top-k OOF candidates (gold + hard negatives) of the training terms."""
-        from .cross_encoder import CrossEncoder, candidate_text, query_text, synonym_groups
+    @staticmethod
+    def _oof_ranker_scores(X: pd.DataFrame, params: dict) -> np.ndarray:
+        fold = (X.item // 1_000_000).to_numpy()
+        out = np.zeros(len(X))
+        for f in np.unique(fold):
+            m = fold == f
+            out[m] = Ranker(FEATURES + DERIVED, **params).fit(X[~m]).score(X[m])
+        return out
+
+    def ce_groups(self, train, system, X, k: int = CE_K):
+        """(query, candidate texts, gold index) for training terms whose gold is in the OOF ranker's top-k;
+        every 10th term goes to an inner dev set used for early stopping."""
+        from .cross_encoder import candidate_text, query_text
 
         cs, texts = self.systems[system], self.oof_items(train, system)
-        X = X.assign(rk=self.ranker[system].score(X)).sort_values(["item", "rk", "code"], ascending=[True, False, True])
-        groups = []
-        for item, g in X.groupby("item").head(CE_K).groupby("item"):
+        top = X.sort_values(["item", "oof_rk", "code"], ascending=[True, False, True]).groupby("item").head(k)
+        tr, dev = [], []
+        for item, g in top.groupby("item", sort=True):
             if g.label.max():
-                groups.append((query_text(*texts[item]), [candidate_text(c, cs) for c in g.code],
-                               int(np.argmax(g.label.values))))
+                grp = (query_text(*texts[item]), [candidate_text(c, cs) for c in g.code], int(np.argmax(g.label.values)))
+                (dev if item % 10 == 0 else tr).append(grp)
+        return tr, dev
+
+    def _train_ce(self, train, system, X, gate: float | None = None):
+        """Cross-encoder on the OOF ranker's top-k candidates (gold + hard negatives) of the training terms."""
+        from .cross_encoder import CrossEncoder, synonym_groups
+
+        tr, dev = self.ce_groups(train, system, X)
         n_syn = int(os.environ.get("TERMMAP_CE_SYN", "0"))
         if n_syn:  # distant supervision from open synonyms (no labelled terms, no leakage)
-            groups += synonym_groups(cs, n_syn, CE_K)
-        print(f"[{system}] training cross-encoder on {len(groups)} groups ({n_syn} synonym groups)")
-        return CrossEncoder().fit(groups, epochs=2, log_every=0)
+            tr += synonym_groups(self.systems[system], n_syn, CE_K)
+        print(f"[{system}] training cross-encoder on {len(tr)} groups (+{len(dev)} dev, {n_syn} synonym groups, "
+              f"k={CE_K}, {CE_EPOCHS} epochs)", flush=True)
+        return CrossEncoder().fit(tr, epochs=CE_EPOCHS, dev=dev, min_dev_after_first=gate, tag=f" {system}")
 
     def rank(self, items: pd.DataFrame, system: str, use_llm: bool = False,
-             llm_threshold: float = 0.8, llm_k: int = 15) -> pd.DataFrame:
-        """Candidates for each term, best first. `prob` is the ranker's confidence (used for routing and
-        reported confidence); `key` is the final order after the cross-encoder blend and LLM adjudication."""
+             llm_threshold: float = 0.8, llm_k: int = 15, selector=None) -> pd.DataFrame:
+        """Candidates for each term, best first. `prob` is the ranker's probability (LLM routing), `key` the
+        final order (cross-encoder / stacker, LLM, training-term lookup) and `conf` the final confidence."""
         X = derive(build_features(items, self.systems[system], self.memory[system]))
         if not len(X):
             return X
-        X["prob"] = softmax_by_group(X, self.ranker[system].score(X))
+        X["rk"] = self.ranker[system].score(X)
+        X["prob"] = softmax_by_group(X, X.rk.to_numpy())
         X = X.sort_values(["item", "prob", "code"], ascending=[True, False, True])
-        X["key"], X["llm"] = X.prob, 0
+        X["key"], X["llm"], X["conf"] = X.prob, 0, X.prob
+        if selector is None and getattr(self, "selector_model", None) is not None:
+            sm = self.selector_model
+            selector = sm.score(items, X.groupby("item").head(sm.k), self.systems[system], system, score="prob")
         if self.ce.get(system) is not None:
-            X = self._ce_rerank(items, X, system)
+            X = self._ce_rerank(items, X, system, selector)
         if use_llm and llm.enabled():
             X = self._adjudicate(items, X, system, llm_threshold, llm_k)
+        X = self._apply_lookup(items, X, system)
         return X.sort_values(["item", "key", "code"], ascending=[True, False, True])
 
-    def _ce_rerank(self, items, X, system) -> pd.DataFrame:
-        """Blend ranker and cross-encoder over each term's top-k: (1-w)*z(ranker) + w*z(cross-encoder)."""
+    def _ce_rerank(self, items, X, system, selector=None) -> pd.DataFrame:
+        """Rescore each term's top-k with the cross-encoder; combine with the ranker through the learned
+        stacker when one is available (scripts/pipeline.py s5), else (1-w)*z(ranker) + w*z(cross-encoder)."""
         from .cross_encoder import candidate_text, query_text
 
         cs = self.systems[system]
         top = X.groupby("item").head(CE_K).copy()
-        top["ce"] = self.ce[system].score([query_text(items.entity.iloc[i], items.chunk_text.iloc[i]) for i in top.item],
-                                          [candidate_text(c, cs) for c in top.code])
-        top["lp"] = np.log(top.prob.clip(lower=1e-12))
-        g = top.groupby("item")
-        z = lambda c: (top[c] - g[c].transform("mean")) / (g[c].transform("std").fillna(0) + 1e-6)
+        qs = {i: query_text(items.entity.iloc[i], items.chunk_text.iloc[i]) for i in top.item.unique()}
+        top["ce"] = self.ce[system].score([qs[i] for i in top.item], [candidate_text(c, cs) for c in top.code])
+        if selector is not None:
+            top = top.merge(selector, on=["item", "code"], how="left")
+            top.index = X.groupby("item").head(CE_K).index
+        F = stack_frame(top)
+        st = self.stacker.get(system)
+        key = st.score(F) if st is not None else (1 - CE_WEIGHT) * F.lp_z + CE_WEIGHT * F.ce_z
         X.loc[top.index, "ce"] = top.ce
-        X.loc[top.index, "key"] = 10 + (1 - CE_WEIGHT) * z("lp") + CE_WEIGHT * z("ce")
+        X.loc[top.index, "key"] = 10 + np.asarray(key)
+        X.loc[top.index, "conf"] = softmax_by_group(top, np.asarray(key))
+        X.loc[~X.index.isin(top.index), "conf"] = 0.0
         return X.sort_values(["item", "key", "code"], ascending=[True, False, True])
+
+    def _apply_lookup(self, items, X, system) -> pd.DataFrame:
+        """S0: a term seen verbatim (after normalisation) in the training labels gets its gold code."""
+        lk = getattr(self.memory[system], "lookup", {})
+        hits = [(i, lk[k]) for i, k in enumerate(expansions(e)[0] for e in items.entity) if k in lk]
+        X["lookup"] = 0
+        if not hits:
+            return X
+        H = pd.DataFrame(hits, columns=["item", "code"])
+        m = X.set_index(["item", "code"]).index.isin(pd.MultiIndex.from_frame(H))
+        X.loc[m, ["key", "conf", "lookup"]] = [1e9, 1.0, 1]
+        new = H[~pd.MultiIndex.from_frame(H).isin(X.set_index(["item", "code"]).index)]
+        if len(new):
+            add = new.assign(key=1e9, conf=1.0, lookup=1, prob=0.0, llm=0)
+            if "label" in X.columns and "code" in items.columns:
+                add["label"] = (add.code.values == items.code.values[add.item.values]).astype(int)
+            X = pd.concat([X, add], ignore_index=True)
+        return X
 
     def _adjudicate(self, items, X, system, threshold, k) -> pd.DataFrame:
         """Send low-confidence terms with their top-k candidates to the LLM. Its pick goes to the top only
@@ -544,12 +702,12 @@ class TermMapEngine:
                 if g is None or not len(g):
                     best.append(""); conf.append(0.0); margin.append(0.0); alts.append("")
                     continue
-                p = g.prob.to_numpy()
+                p = g.conf.fillna(0).to_numpy()
                 best.append(g.code.iloc[0])
                 conf.append(round(float(p[0]), 4))
                 margin.append(round(float(p[0] - (p[1] if len(p) > 1 else 0.0)), 4))
                 alts.append(" | ".join(f"{c}:{pref.get(c, '')}:{q:.3f}" for c, q in
-                                       zip(g.code.iloc[:top_n], g.prob.iloc[:top_n])))
+                                       zip(g.code.iloc[:top_n], p[:top_n])))
             out[f"{col}_code"] = best
             out[f"{col}_display"] = [pref.get(c, "") for c in best]
             out[f"{col}_confidence"] = conf

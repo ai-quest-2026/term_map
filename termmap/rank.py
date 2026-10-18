@@ -29,7 +29,8 @@ def derive(X: pd.DataFrame) -> pd.DataFrame:
         X[f"{c}_gap"] = X[c] - g[c].transform("max")
     for c in _RANKED:
         X[f"{c}_grank"] = g[c].rank(ascending=False, method="min")
-    X["n_sources"] = (X.d_char > 0).astype(int) + (X.d_word > 0) + (X.d_dense > 0) + (X.m_char > 0) + (X.m_exact > 0)
+    X["n_sources"] = ((X.d_char > 0).astype(int) + (X.d_word > 0) + (X.d_dense > 0) + (X.m_char > 0) + (X.m_exact > 0)
+                      + (X.d_sap > 0) + (X.m_sap > 0))
     X["best_evidence"] = X[["d_char", "d_dense", "m_char", "soft_q", "d_sap", "m_sap"]].max(axis=1)
     # The training-frequency prior only counts when there is textual evidence for the code.
     X["freq_gated"] = X.freq * X.best_evidence ** 2

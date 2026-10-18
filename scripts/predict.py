@@ -29,12 +29,17 @@ def main():
     ap.add_argument("--input", required=True)
     ap.add_argument("--output", required=True)
     ap.add_argument("--details", default=None)
+    ap.add_argument("--selector", default=None,
+                    help="LoRA selector adapter dir (scripts/train_selector.py); used with an exported stacker")
     ap.add_argument("--llm", action="store_true", help="experimental: adjudicate low-confidence terms with LLM_PROVIDER")
     ap.add_argument("--refit", action="store_true", help="retrain on the training file instead of using the cache")
     args = ap.parse_args()
 
     items = data.read_input(args.input)
     eng = get_engine(args.refit)
+    if args.selector:
+        from termmap.selector import Selector
+        eng.selector_model = Selector(args.selector)
     t0 = time.time()
     pred = eng.predict(items, use_llm=args.llm)
     print(f"mapped {len(items)} terms in {time.time() - t0:.1f}s")
