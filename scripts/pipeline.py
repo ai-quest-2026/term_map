@@ -262,12 +262,18 @@ def stage_s3(run: Run, fold: int, args) -> None:
              f"(need +{args.s3_margin:.3f})", args)
 
 
-def stack_data(run: Run, fold: int, system: str, k: int, with_sel: bool) -> pd.DataFrame | None:
-    if not run.has("ce", fold, system) or (with_sel and not run.has("sel", fold, system)):
+def stack_data(run: Run, fold: int, system: str, k: int, with_sel: bool, ranker_only: bool = False) -> pd.DataFrame | None:
+    if ranker_only:
+        if not run.has("test", fold, system):
+            return None
+    elif not run.has("ce", fold, system) or (with_sel and not run.has("sel", fold, system)):
         return None
     test = run.load("test", fold, system)
     tt = test.sort_values(["item", "score", "code"], ascending=[True, False, True]).groupby("item").head(k)
-    tt = tt.merge(run.load("ce", fold, system), on=["item", "code"], how="left")
+    if ranker_only:
+        tt = tt.assign(ce=0.0)
+    else:
+        tt = tt.merge(run.load("ce", fold, system), on=["item", "code"], how="left")
     if with_sel:
         tt = tt.merge(run.load("sel", fold, system)[["item", "code", "sel_p"]], on=["item", "code"], how="left")
     F = stack_frame(tt.reset_index(drop=True))
@@ -285,7 +291,7 @@ def stage_s5(run: Run, folds_eval: list[int], train: pd.DataFrame, args) -> None
     for system in config.SYSTEMS:
         # With --with-selector only folds the selector scored are used (it is trained per fold and is slow);
         # without it the selector feature is absent everywhere, so the stacker is consistent across folds.
-        frames = {f: stack_data(run, f, system, args.ce_k, args.with_selector) for f in range(N_FOLDS)}
+        frames = {f: stack_data(run, f, system, args.ce_k, args.with_selector, args.ranker_only) for f in range(N_FOLDS)}
         frames = {f: F for f, F in frames.items() if F is not None}
         if not frames:
             log(f"s5 [{system}]: no s3 caches; run s3 first")
@@ -296,7 +302,9 @@ def stage_s5(run: Run, folds_eval: list[int], train: pd.DataFrame, args) -> None
             with_sel = lambda X: bool("sel_p" in X.columns and X.sel_p.notna().any())
             # Folds scored by the selector only stack with folds that have it too (else cross-fit in-fold).
             others = [frames[g] for g in frames if g != f and with_sel(frames[g]) == with_sel(F)]
-            if others:   # leave-one-fold-out: the stacker never saw this fold
+            if args.ranker_only:  # fallback scoring: v2 ranker order (+ lookup), no reranker, no stacker
+                F = F.assign(st=F.score.to_numpy())
+            elif others:   # leave-one-fold-out: the stacker never saw this fold
                 F = F.assign(st=fit_stacker(pd.concat(others)).score(F))
             else:        # a single cached fold: two-way cross-fit inside it
                 half = (F.item % 2).to_numpy()
@@ -332,7 +340,7 @@ def stage_s5(run: Run, folds_eval: list[int], train: pd.DataFrame, args) -> None
                                           "pred": pred.values, "seen": items.seen,
                                           "confidence": conf.reindex(items.index).fillna(0).values,
                                           "in_candidates": items.index.isin(F[F.label == 1].item)}))
-        if args.export_stacker:
+        if args.export_stacker and not args.ranker_only:
             st = fit_stacker(pd.concat(frames.values()))
             import joblib
             joblib.dump(st, stacker_path(system))
@@ -341,12 +349,13 @@ def stage_s5(run: Run, folds_eval: list[int], train: pd.DataFrame, args) -> None
         run.write_metrics("s5", f, {"fold": f, **mm})
     if out_rows:
         P = pd.concat(out_rows)
-        P.to_csv(run.reports / "predictions.csv", index=False)
+        out = run.reports / ("predictions_ranker_only.csv" if args.ranker_only else "predictions.csv")
+        P.to_csv(out, index=False)
         for system, d in P.groupby("system", sort=False):
             log(f"s5 POOLED [{system}] folds={sorted(int(x) for x in d.fold.unique())} n={len(d)} exact={(d.pred == d.code).mean():.4f} "
                 f"unseen={(d.pred == d.code)[~d.seen].mean():.4f}")
         accs = P.assign(c=P.pred == P.code).groupby("system").c.mean()
-        log(f"s5 POOLED HEADLINE (min) = {accs.min():.4f}   -> {run.reports / 'predictions.csv'}")
+        log(f"s5 POOLED HEADLINE (min) = {accs.min():.4f}   -> {out}")
 
 
 def main():
@@ -364,6 +373,8 @@ def main():
     ap.add_argument("--s3-margin", type=float, default=0.0, help="required gain of the best blend over the ranker")
     ap.add_argument("--save-models", action="store_true")
     ap.add_argument("--with-selector", action="store_true", help="s5: use the LLM selector feature (folds with s4 caches)")
+    ap.add_argument("--ranker-only", action="store_true",
+                    help="s5 without s3: score v2 ranker + training-term lookup (fallback if no reranker passes)")
     ap.add_argument("--s2-from", default=None, help="read s2 caches (candidates) from another run")
     ap.add_argument("--export-stacker", action="store_true")
     ap.add_argument("--force", action="store_true", help="recompute cached stages")
