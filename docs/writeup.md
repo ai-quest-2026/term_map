@@ -33,14 +33,19 @@ entity + chunk_text
      training-frequency prior gated by textual evidence, leaf / unspecified flags, SNOMED semantic tag
      → trained out-of-fold, so memory features look on training terms exactly as on unseen terms
   ▼
-  4. cross-encoder reranker (SapBERT/PubMedBERT weights) reads [term ; context sentence] × [candidate
-     description (tag) [ICD category]] for the top 15, trained listwise on our hard negatives;
-     final score = 0.7 · z(ranker) + 0.3 · z(cross-encoder)
+  4. cross-encoder reranker (SapBERT weights) reads [term ; context sentence] × [candidate
+     description (tag) [ICD category]] for the top 30, trained listwise on out-of-fold ranker lists
+  ▼
+  5. LLM selector: local Qwen2.5-7B-Instruct + LoRA adapter, fine-tuned to pick the gold code among
+     the ranked candidates (letter choice); its per-candidate probability is a feature
+  ▼
+  6. stacker (LambdaRank over ranker / cross-encoder / selector scores, ranks and gaps)
+     + exact training-term lookup
   ▼
 icd10cm_code, snomed_code + calibrated confidence, margin and top-5 alternatives
 ```
 
-There is one deterministic command: `scripts/predict.py`. Seeds are fixed, LightGBM is deterministic, cross-encoder training uses deterministic GPU kernels, and nothing calls the network at inference. Retrieval and ranking take about 30–35 ms per term per system on CPU; the GPU figure with the cross-encoder is to be measured.
+There is one deterministic command: `scripts/predict.py`. Seeds are fixed, LightGBM is deterministic, cross-encoder training uses deterministic GPU kernels, and nothing calls the network at inference. Retrieval and ranking take about 25–30 ms per term per system on CPU. End-to-end time of the shipped engine (with the 7B selector, A6000): TIMING_TBD. The selector is a local open-weight model: no data leaves the machine.
 
 ## 3. Results (5-fold CV, all labelled diagnosis terms)
 
@@ -48,14 +53,18 @@ There is one deterministic command: `scripts/predict.py`. Seeds are fixed, Light
 |---|---|---|---|
 | Lexical retrieval + learned ranker | 0.525* | 0.517* | 0.517 |
 | + SapBERT retrieval, LambdaRank, open-synonym aliases, memory of the other system's wording | 0.647 | 0.580 | 0.580 |
-| **+ cross-encoder reranker (final)** | **0.658** | **0.604** | **0.604** |
+| + cross-encoder reranker (locked baseline) | 0.658 | 0.604 | 0.604 |
+| **v2: fixed displays/tags, OOF-trained cross-encoder (top 30), stacker, term lookup** | **0.665** | **0.622** | **0.622** |
+| v2 + LoRA LLM selector (shipped): **fold 0 only** | 0.716† | 0.685† | 0.685† |
 
-*20% split.
+*20% split. †One fold (451 ICD / 540 SNOMED terms); on the same fold v2 without the selector scores 0.667 / 0.617 and the baseline 0.656 / 0.607. The selector is trained per fold (~72 min on one A6000), so the 5-fold run measures v2 *without* it.
 
-- **Codes unseen in training (long tail):** ICD 0.440, SNOMED 0.477.
-- **ICD right 3-character category:** 0.770.
-- **The right code is among the candidates** for 93% (ICD) and 92% (SNOMED) of terms.
-- **Confidence is usable for abstention.** Answering only the most confident 80% of terms gives ICD 0.753 / SNOMED 0.687. Terms scored ≥ 0.9 are 94–95% correct.
+- **v2 vs the baseline (paired over all 5,005 rows):** ICD +1.1 pt [−0.2, +2.4], p=0.10; SNOMED +1.6 pt [+0.4, +2.8], p=0.01.
+- **The selector vs the baseline on fold 0:** ICD +6.0 pt [+2.7, +9.3], SNOMED +7.8 pt [+4.3, +11.3], both p<0.001. The largest gain is on SNOMED codes unseen in training (+12.3 pt).
+- **Codes unseen in training (long tail), v2 5-fold:** ICD 0.431, SNOMED 0.495 (fold 0 with the selector: 0.474 / 0.605).
+- **ICD right 3-character category:** 0.774 (fold 0 with the selector: 0.834).
+- **The right code is among the candidates** for 92% (ICD) and 89% (SNOMED) of terms.
+- **Confidence is usable for abstention.** v2 5-fold, answering only the most confident 80% of terms: ICD 0.770 / SNOMED 0.719; terms scored ≥ 0.9 (28–34% of terms) are 93–94% correct. Fold 0 with the selector: 0.822 / 0.775 at 80%, and 95–96% correct at ≥ 0.9.
 
 ## 4. Design decisions
 - **Retrieve-then-rank, not classification.** Half the SNOMED test codes are unseen, so a classifier over training codes would cap long-tail accuracy near zero.
@@ -67,7 +76,7 @@ There is one deterministic command: `scripts/predict.py`. Seeds are fixed, Light
   SapBERT was the largest single gain: +8 ICD / +4 SNOMED.
 - **Out-of-fold training.** The ranker is trained on features computed with a training-example memory that excludes the term's own fold. Otherwise memory features look perfect in training and fail at test time.
 - **Leakage discipline for neural parts.** The cross-encoder is retrained inside every fold. The SapBERT variant fine-tuned on labelled terms was *not* shipped, because it would leak into the ranker's training features.
-- **No LLM in the final system.** The data may not go to retaining APIs, so only local models were acceptable. A local Qwen2.5-32B was less accurate than our ranker on the terms it was asked about (0.41 vs 0.45). As a gated tie-breaker it added ≈ +2–3 points on one split, but that is not confirmed in 5-fold, and it would cost about a second per term. The code path is kept (`LLM_PROVIDER`) and documented.
+- **A fine-tuned local LLM as a selector, not a zero-shot judge.** The data may not go to retaining APIs, so only local models were acceptable. Prompted LLMs (Qwen2.5-14B/32B) were weaker than our ranker and only helped as a gated tie-breaker (+2–3 on one split). Fine-tuning Qwen2.5-7B-Instruct with LoRA (0.5% of weights, ~70 min per fold) to choose among the ranker's candidates changed that: on fold 0 the selector alone beats the ranker (0.667 vs 0.641 ICD, 0.663 vs 0.578 SNOMED), and as a stacker feature it adds +4.4 / +8.0 pt over v2. It is an open-weight model running on our GPU, so no data leaves the machine. The shipped adapter is the fold-0 one (trained on folds 1–4); its gain is measured on one fold only.
 
 ## 5. Error analysis
 Using the 5-fold predictions (`scripts/error_report.py`):
@@ -104,12 +113,12 @@ Using the 5-fold predictions (`scripts/error_report.py`):
 - **Cross-encoder variants:** distant supervision from 10k synonyms per system made it stronger alone (+4.7 / +2.0) but not in the blend.
 - **LLM adjudication:**
   - Gemini 2.5 Flash: +9 / +11 on 200 terms, but it is a hosted API that may retain data, so it was used only for that preliminary test;
-  - Qwen2.5-14B/32B locally: +2–3 only as a gated tie-breaker.
+  - Qwen2.5-14B/32B locally, prompted: +2–3 only as a gated tie-breaker; replaced by the fine-tuned 7B selector (section 4).
 
 ## 8. What we would do next
 1. Get the label conventions adjudicated, or obtain multi-annotator labels, to know the true ceiling.
 2. Train the cross-encoder on more in-domain labelled data, ideally with the full chart section rather than a 120-character window.
-3. Fine-tune a local LLM on the training conventions as a reranker, instead of zero-/few-shot prompting.
+3. Train the LLM selector on every fold (and on all data for the shipped adapter) to confirm its fold-0 gain in 5-fold CV; it costs ~72 min per fold on one A6000.
 4. Add the official SNOMED→ICD-10-CM map once the UMLS licence arrives, as an agreement feature.
 
 ## 9. External resources and licences
@@ -123,5 +132,6 @@ Using the 5-fold predictions (`scripts/error_report.py`):
 | Mondo (downloaded 2026-10-17) | synonyms, cross-references | CC BY 4.0 |
 | Human Phenotype Ontology (2026-09-01) | sign/symptom synonyms | HPO licence (attribution) |
 | LightGBM, scikit-learn, PyTorch, transformers, FastAPI | modelling, serving | MIT / BSD / BSD / Apache-2.0 / MIT |
+| Qwen2.5-7B-Instruct + our LoRA adapter (local, shipped) | LLM selector | Apache-2.0 |
 | Qwen2.5-14B/32B-Instruct-AWQ via vLLM (experiments only, local) | LLM adjudication tests | Apache-2.0 |
 | Gemini 2.5 Flash (preliminary test on 200 held-out terms only) | LLM adjudication test | Google API terms |

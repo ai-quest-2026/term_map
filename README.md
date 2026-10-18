@@ -44,7 +44,7 @@ Everything built is cached in `data/cache/` (gitignored).
 
 | What | Command |
 |---|---|
-| Predict (single command) | `python -m scripts.predict --input eval.csv --output predictions.csv [--details details.csv]` |
+| Predict (single command) | `python -m scripts.predict --input eval.csv --output predictions.csv [--details details.csv] --selector data/cache/stages/v2/selector_f0` |
 | Retrain from scratch | add `--refit` (about 2 min on 4 CPUs) |
 | Hold-out evaluation | `python -m scripts.evaluate` → prints metrics, writes `reports/val_predictions.csv` |
 | API | `uvicorn api.main:app --port 8000`, then open `/docs` |
@@ -63,20 +63,24 @@ The engine is deterministic: there's no sampling, the seeds are fixed, and folds
 
 ## Current results (5-fold CV grouped by chunk, all 5,005 DiagnosisCode rows; full log in [docs/experiments.md](docs/experiments.md))
 
-**Locked configuration:** hybrid retrieval (char/word TF-IDF, scispacy vectors, SapBERT, training memory, open-synonym aliases, ICD hierarchy) → LambdaRank → cross-encoder blend (w = 0.3 over the top 15). LLM off.
+**Shipped engine (v2):** hybrid retrieval (char/word TF-IDF, scispacy vectors, SapBERT, training memory, open-synonym aliases, ICD hierarchy) → LambdaRank → cross-encoder (top 30, trained on out-of-fold ranker lists) → local LLM selector (Qwen2.5-7B-Instruct + LoRA, trained on folds 1–4) → stacker + exact training-term lookup. The LLM runs locally, so no data leaves the machine.
 
 | version | ICD exact | SNOMED exact | headline (min) |
 |---|---|---|---|
 | lexical + learned ranker (20% split) | 0.525 | 0.517 | 0.517 |
 | + SapBERT retrieval, LambdaRank, open aliases, cross-system memory | 0.647 | 0.580 | 0.580 |
-| **+ cross-encoder reranker (final)** | **0.658** | **0.604** | **0.604** |
+| + cross-encoder reranker (locked baseline) | 0.658 | 0.604 | 0.604 |
+| **v2 (no selector), 5-fold** | **0.665** | **0.622** | **0.622** |
+| v2 + LLM selector (shipped), **fold 0 only** | 0.716 | 0.685 | 0.685 |
 
-- Codes unseen in training (long tail): ICD 0.440, SNOMED 0.477. ICD right 3-character category: 0.770.
-- The gold code is among the candidates for 93% (ICD) / 92% (SNOMED) of terms; about 81% of errors are ranking decisions, not retrieval misses.
-- Answering only the most confident 80% of terms: ICD 0.753 / SNOMED 0.687.
-- Reproduce: `python -m scripts.evaluate --cv 5` (the cross-encoder turns on automatically with a GPU; `--ce off` to skip it).
+- v2 vs baseline over all 5,005 rows (paired): ICD +1.1 pt (p=0.10), SNOMED +1.6 pt (p=0.01). On fold 0 the selector adds +4.4 / +8.0 pt over v2 and is +6.0 / +7.8 pt over the baseline (both p<0.001). It is measured on one fold only, because training it costs ~72 min per fold.
+- Codes unseen in training (v2, 5-fold): ICD 0.431, SNOMED 0.495. ICD right 3-character category: 0.774.
+- The gold code is among the candidates for 92% (ICD) / 89% (SNOMED) of terms.
+- Answering only the most confident 80% of terms (v2, 5-fold): ICD 0.770 / SNOMED 0.719.
+- Reproduce: `python -m scripts.pipeline --run v2 --folds all --stages s2,s3,s5` (GPU; stages are cached), selector: `python -m scripts.train_selector --run v2 --fold 0`, then `--stages s5 --with-selector --export-stacker`.
+- Older locked-pipeline reproduction: `python -m scripts.evaluate --cv 5` (the cross-encoder turns on automatically with a GPU; `--ce off` to skip it).
 
-Tried and not shipped (numbers in the experiment log): local LLM adjudication (Qwen2.5-14B/32B, only +2–3 as a gated tie-breaker on one split), SapBERT fine-tuning, synonym-augmented cross-encoder, joint ICD+SNOMED decoding, polarity/drift features. See [docs/writeup.md](docs/writeup.md) for the write-up.
+Tried and not shipped (numbers in the experiment log): prompted local LLM adjudication (Qwen2.5-14B/32B, only +2–3 as a gated tie-breaker on one split; replaced by the fine-tuned selector), SapBERT fine-tuning, synonym-augmented cross-encoder, joint ICD+SNOMED decoding, polarity/drift features. See [docs/writeup.md](docs/writeup.md) for the write-up.
 
 Fast ranker experiments: `python -m scripts.ranker_lab dump` once per retrieval change, then `python -m scripts.ranker_lab run`.
 
