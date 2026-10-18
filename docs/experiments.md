@@ -47,6 +47,26 @@ J1: joint decoding helps ICD slightly (the SNOMED pick informs the ICD choice) b
 
 C2: synonym training makes the cross-encoder better on its own (+4.7 ICD, +2.0 SNOMED) but not in the blend with the ranker (ICD +0.4–0.8, SNOMED −0.3, all within noise). The ranker already supplies the vocabulary signal, and the residual errors are coder convention and context. Kept as an option (TERMMAP_CE_SYN), off by default.
 
+## v2: diagnosis of the plateau and staged pipeline (18 Oct)
+
+Findings that changed the plan (CPU config, no SapBERT/CE, unless noted):
+- **Context is unused.** Blanking `chunk_text` at test time: split ICD 0.546 → 0.546, SNOMED 0.524 → 0.512. Context features carry ~2% of ranker gain.
+- **Cross-encoder trained on the wrong lists.** `_train_ce` built lists with the in-sample ranker (gold first in 93–97% of lists), while at test time the OOF ranker has gold first only 66–69% of the time. v2 trains on cross-fitted OOF ranker lists.
+- **Cross-encoder only saw the top 15.** SNOMED gold in top 15 was 0.837 vs 0.904 in all candidates; v2 uses k=30.
+- **Display text bugs.** The ICD display was the first spreadsheet row, often the abbreviated CMS short form ("Oth symptoms …"), for 19.6% of ICD gold codes; v2 uses the CDC tabular long description or the full wording. SNOMED semantic tags were mis-parsed for 1,388 concepts (e.g. "combined site", "ajcc"); v2 only accepts real semantic tags.
+- **Labels are consistent.** Training terms with identical word sets agree 97% (ICD) / 91% (SNOMED). The earlier 28% / 43% "label conflict" figure used a loose grouping that dropped qualifiers, which legitimately change the code. So label noise is not the ceiling.
+- **Training terms were not reproduced.** Training terms fed back in got their gold code only 97% / 86% of the time. v2 adds an exact training-term lookup (S0).
+- **Error profile (split, ranker).** ICD: 22% never retrieved, 38% of in-candidate errors at rank 2, 28% in the same 3-character category. SNOMED: 28% never retrieved, 31% at rank 2.
+
+| # | Change (CV fold 0, CPU config) | ICD exact | SNOMED exact | ICD recall | SNOMED recall | Note |
+|---|---|---|---|---|---|---|
+| V0 | locked engine, CE off (old code, same fold) | 0.5831 | 0.5519 | 0.887 | 0.882 | baseline for v2 |
+| V1 | v2 S1/S2: tag + display fixes, general-code expansion, ICD-only negation queries, freq per 1000, regularised ranker | 0.5920 | 0.5222 | 0.896 | 0.882 | SNOMED −3.0, McNemar p=0.026 |
+| V1a | same features, ranker ablation: original 600-tree ranker | 0.5765 | 0.5389 | | | ICD prefers regularised (split +0.9, fold 0 +1.5); SNOMED prefers original (split −0.4, fold 0 +1.9) |
+| V2 | per-system ranker params (ICD regularised, SNOMED original) | 0.5920 | 0.5389 | 0.896 | 0.882 | SNOMED −1.3 vs V0, within noise (MDE ≈ 3.4 pt on 540 terms) |
+
+GPU-side results for S3 (cross-encoder v2), S4 (LLM selector) and S5 (stacker) go below as they come in. See `docs/gpu_runbook.md`.
+
 ## Locked configuration
 Base SapBERT + lexical/word-vector retrieval + training memory → LambdaRank → cross-encoder blend (w=0.3, top-15), LLM off.
 CV5: ICD 0.658, SNOMED 0.604 (#8).

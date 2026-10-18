@@ -40,7 +40,7 @@ entity + chunk_text
 icd10cm_code, snomed_code + calibrated confidence, margin and top-5 alternatives
 ```
 
-There is one deterministic command: `scripts/predict.py`. Seeds are fixed, LightGBM is deterministic, and nothing calls the network at inference. Speed is about 35 ms per term on one GPU.
+There is one deterministic command: `scripts/predict.py`. Seeds are fixed, LightGBM is deterministic, cross-encoder training uses deterministic GPU kernels, and nothing calls the network at inference. Retrieval and ranking take about 30–35 ms per term per system on CPU; the GPU figure with the cross-encoder is to be measured.
 
 ## 3. Results (5-fold CV, all labelled diagnosis terms)
 
@@ -83,12 +83,11 @@ Using the 5-fold predictions (`scripts/error_report.py`):
 | Version drift | gold codes that FY2024–26 split into children: 26% accuracy (1.9% of ICD rows) | M51.36 (gold) vs FY2026 M51.360… |
 | Long tail | unseen codes 0.44 / 0.48 vs seen 0.73 / 0.72 | |
 
-**Label consistency sets the ceiling.** We grouped terms whose words match after dropping qualifiers: 28% of such ICD groups and 43% of SNOMED groups carry more than one gold code. Part of this is legitimate (laterality, acuity), but some is the same meaning coded two ways:
+**Labels are mostly consistent, so the gap is ours to close.** Training terms with exactly the same words agree on the code 97% of the time for ICD and 91% for SNOMED. Disagreements are rare but real:
 - "class iii obesity" → *Severe obesity*, but "obesity class iii" → *Obese class III*;
-- "asthma with rsv" → J45.901, but "rsv with asthma" → J45.909;
-- "ble edema" → R60.9, but "mild ble edema" → R60.0.
+- "asthma with rsv" → J45.901, but "rsv with asthma" → J45.909.
 
-No mapper can be right on both sides of such pairs. We think adjudicated, multi-annotator labels (the PS's open question) are a prerequisite for a 95% target.
+(An earlier draft reported 28% / 43% conflicting groups. That grouping dropped qualifiers such as "mild" or "acute", which legitimately change the code.) The real limits are retrieval of codes never seen in training, and decisions that need the context, which our first architecture barely used: blanking the chart text changed accuracy by under 1 point.
 
 ## 6. Innovations
 - **Our own terminology service instead of the UMLS API.** It merges Disease Ontology (CC0), Mondo (CC BY 4.0) and HPO with the CDC ICD-10-CM FY2026 index. The result is 64k concepts, 145k extra aliases and a 9,856-pair open SNOMED↔ICD crosswalk, served by `/terminology/{concept,crosswalk,search}`. It covers 33% of ICD and 42% of SNOMED gold codes with extra synonyms, with no licence wait.
