@@ -107,7 +107,15 @@ s2 for folds 1–4 was run on the CPU (`CUDA_VISIBLE_DEVICES=""`, ~3.5 min per f
 | 3 | 0.6721 / 0.9369 (0.9409) | 0.6124 / 0.9398 (0.9398) |
 | 4 | 0.6475 / 0.9534 (0.9490) | 0.5787 / 0.9114 (0.9114) |
 
-LLM selector fold 0 (Qwen2.5-7B LoRA, `logs/sel_f0.log`): CHECKPOINT step 150 dev acc 0.655, step 300 0.720, vs ranker 0.605 on the same 200 dev terms; left running to completion (476 steps).
+LLM selector fold 0 (Qwen2.5-7B LoRA, `logs/sel_f0.log`): CHECKPOINT step 150 dev acc 0.655, step 300 0.720, vs ranker 0.605 on the same 200 dev terms; left running to completion (476 steps, 69.9 min; best dev 0.720 at step 300, final 0.690).
+
+| # | Stage (fold 0) | ICD | SNOMED | Note |
+|---|---|---|---|---|
+| G5 | s4: selector top-1 on test vs ranker | 0.6674 vs 0.6408 | 0.6630 vs 0.5778 | |
+| G5 | s5 `--with-selector` FINAL (stacker cross-fit in fold 0) | **0.7162** (seen 0.798 / unseen 0.474) | **0.6852** (seen 0.765 / unseen 0.605) | vs G4 without selector: **+4.4 / +8.0 pt** |
+| G5 | compare vs #9 fold 0 (paired, McNemar; `logs/v2sel_vs_run9_f0.txt`) | 0.6563 → 0.7162, **+5.99** [+2.66, +9.31], p=0.0006 | 0.6074 → 0.6852, **+7.78** [+4.26, +11.30], p<0.0001 | seen/unseen: ICD +5.93/+6.14, SNOMED +3.31/+12.31 |
+
+**Selector decision: keep** (rule: FINAL ≥ +2 pt on both systems; it is +4.4 / +8.0). Caveat: this is one fold only. The selector is trained per fold (~72 min on the A6000, cannot share the card with CE training), so folds 1–4 do not have it yet; the 5-fold run below is v2 *without* the selector.
 
 ## Locked configuration
 Base SapBERT + lexical/word-vector retrieval + training memory → LambdaRank → cross-encoder blend (w=0.3, top-15), LLM off.
