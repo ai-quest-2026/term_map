@@ -7,7 +7,7 @@ full 5-fold run before fold 0 has passed all gates. Keep each step's log: `2>&1 
 ## 0. Setup (10 min)
 ```bash
 cd ~/term_map && git pull && source .venv/bin/activate && mkdir -p logs
-pkill -f "vllm serve" || true          # free the GPU; nothing below needs vLLM
+pkill -f "[v]llm serve" || true        # free the GPU; [v] stops pkill matching its own shell
 pip install peft accelerate             # then confirm torch is unchanged:
 python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 python -m scripts.doctor                # must end with "0 FAIL"

@@ -67,6 +67,19 @@ Findings that changed the plan (CPU config, no SapBERT/CE, unless noted):
 
 GPU-side results for S3 (cross-encoder v2), S4 (LLM selector) and S5 (stacker) go below as they come in. See `docs/gpu_runbook.md`.
 
+### GPU run, 18 Oct (A6000, WSL; logs in `logs/`)
+Baseline for gates and paired comparison: `reports/val_predictions.csv` had been overwritten by run **#9** (pooled ICD 0.6538 / SNOMED 0.6056, recall 0.940 / 0.922), not the locked #8 (0.658 / 0.604); no copy of #8's per-row output exists. Saved as `reports/baseline_cv5_run9.csv` and used as the reference (within noise of #8; its higher recall makes the s2 gate slightly stricter). Fold 0 of #9: ICD 0.6563 (n=451), SNOMED 0.6074 (n=540).
+
+| # | Stage (fold 0, GPU config) | ICD | SNOMED | Gate |
+|---|---|---|---|---|
+| G1 | s2: ranker top-1 | 0.6408 | 0.5778 | |
+| G1 | s2: recall r@15 / r@30 / r@any | 0.889 / 0.905 / 0.931 | 0.867 / 0.893 / 0.924 | PASS: r@any vs #9 fold 0 0.938 / 0.924 (−0.7 / ±0 pt, allow −1) |
+| G1 | s2: unseen r@any | 0.798 | 0.881 | |
+| G1 | s2: train top-1 OOF / in-sample | 0.643 / 0.716 | 0.579 / 0.884 | ICD gap 0.07 (was 0.57/0.86); SNOMED keeps the original 600-tree ranker, so its gap stays large |
+| G2 | s3: CE v2 (SapBERT init, k=30, OOF lists), epoch 1 train / dev acc | 0.515 / **0.432** | not reached | **FAIL** (< 0.45), training aborted after epoch 1 (~2 min) |
+
+G2 context: on the same 169 ICD dev lists (gold in top 30) the OOF ranker's top-1 is 0.740, so the CE alone is 31 pt below it after epoch 1. Dev n=169 gives SE ≈ 3.8 pt, so 0.432 vs 0.45 is within half an SE. At step 100 the loss was 3.25, against ln 30 = 3.40 for uniform. Note: the CE gate raises `RuntimeError` (exit 1), not exit 2 as the runbook says. Stopped here pending a decision; s5 / compare / the 5-fold run were not run.
+
 ## Locked configuration
 Base SapBERT + lexical/word-vector retrieval + training memory → LambdaRank → cross-encoder blend (w=0.3, top-15), LLM off.
 CV5: ICD 0.658, SNOMED 0.604 (#8).
