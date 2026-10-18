@@ -80,6 +80,23 @@ Baseline for gates and paired comparison: `reports/val_predictions.csv` had been
 
 G2 context: on the same 169 ICD dev lists (gold in top 30) the OOF ranker's top-1 is 0.740, so the CE alone is 31 pt below it after epoch 1. Dev n=169 gives SE ≈ 3.8 pt, so 0.432 vs 0.45 is within half an SE. At step 100 the loss was 3.25, against ln 30 = 3.40 for uniform. Note: the CE gate raises `RuntimeError` (exit 1), not exit 2 as the runbook says. Stopped here pending a decision; s5 / compare / the 5-fold run were not run.
 
+The epoch-1 gate was then lowered to 0.15 ("not learning"; chance at k=30 is 0.033) in `9aa62b0`, and s3 was rerun unchanged.
+
+| # | Stage (fold 0, GPU config) | ICD | SNOMED | Gate |
+|---|---|---|---|---|
+| G3 | s3 rerun: CE dev acc by epoch 1 / 2 / 3 / 4 (best epoch kept) | 0.432 / 0.550 / 0.580 / 0.586 | 0.604 / 0.656 / 0.682 / 0.672 | epoch-1 PASS (≥ 0.15). Ranker on the same dev lists: 0.740 / 0.656 |
+| G3 | s3: gold@30 / ranker / CE alone / blend w=0.3 (= best blend) | 0.905 / 0.6408 / 0.5255 / **0.6696** | 0.893 / 0.5778 / 0.5481 / **0.6074** | blend ≥ ranker PASS on both (+2.9 / +3.0 pt) |
+| G4 | s5: stacker (two-way cross-fit inside fold 0) + training-term lookup = FINAL | **0.6718** (seen 0.766 / unseen 0.395) | **0.6056** (seen 0.695 / unseen 0.515) | stacker alone 0.6718 / 0.6037 |
+| G4 | compare vs #9 fold 0 (paired, McNemar) | 0.6563 → 0.6718, **+1.55 pt** [−1.55, +4.66], p=0.40 | 0.6074 → 0.6056, **−0.19 pt** [−3.15, +2.78], p=1.00 | headline 0.6074 → 0.6056 |
+| G4 | compare slices: seen / unseen codes | +2.67 / −1.75 pt | −3.68 (p=0.099) / +3.36 pt (p=0.20) | none significant |
+
+Notes on G3/G4:
+- The first s3 rerun (`logs/v2_s3_f0b.log`) crashed after ICD epoch 4 with `CUBLAS_STATUS_INTERNAL_ERROR` in the test-scoring step. It did not reproduce when scoring the same 13,530 pairs with a fresh model (8.8 s, 2 GB peak), and the next identical run (`logs/v2_s3_f0c.log`) passed. The per-epoch numbers were bit-identical across all three runs.
+- **CE training holds ~47–48.5 GB of the A6000** within 30 s of starting (`logs/gpu_mem_s3c.log`): 8 lists × 30 candidates × 192 tokens through eager attention. That is not the ~8 GB the runbook assumed, so the LLM selector cannot run alongside s3 / the 5-fold run on one 48 GB card. The near-full device is the likely cause of the cuBLAS error.
+- The training-term lookup adds nothing in CV (FINAL = stacker on ICD): CV test entities never occur in the training side. It only matters for eval terms that repeat training terms.
+- With one cached fold the stacker is fitted on half of fold 0 at a time. On SNOMED it is 0.4 pt below the fixed 0.3 blend; in the 5-fold run it is fitted leave-one-fold-out on ~4× the data.
+- **Decision rule.** The runbook says to run all folds if B ≥ A on both systems, or within −1 pt on one with a clear gain on the other. SNOMED is −0.19 (within −1), but the ICD gain (+1.55, p=0.40) is not clear on 451 terms, and the headline does not beat the baseline (0.6056 vs 0.6074). 5-fold not started; the decision is pending.
+
 ## Locked configuration
 Base SapBERT + lexical/word-vector retrieval + training memory → LambdaRank → cross-encoder blend (w=0.3, top-15), LLM off.
 CV5: ICD 0.658, SNOMED 0.604 (#8).
