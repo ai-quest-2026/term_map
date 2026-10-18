@@ -256,11 +256,26 @@ with tab1:
             shown = (chunk[:i] + f":orange-background[**{chunk[i:i + len(entity.strip())]}**]" + chunk[i + len(entity.strip()):]
                      if i >= 0 else chunk)
             st.markdown("**Context:** " + shown.replace("$", "\\$"))
-        a, b = st.columns(2)
-        with a:
-            code_card(pred.iloc[0], ICD, review_below)
-        with b:
-            code_card(pred.iloc[0], SNOMED, review_below)
+        row = pred.iloc[0]
+        confs = {s: float(row[f"{COLS[s]}_confidence"] or 0) for s in (ICD, SNOMED)}
+        if max(confs.values()) < review_below:  # neither system is confident: likely not a clinical term we can code
+            st.error(f"**No confident match.** This does not look like a codable clinical term (confidence ICD "
+                     f"{confs[ICD]:.2f}, SNOMED {confs[SNOMED]:.2f}, both below {review_below:.2f}). "
+                     "Check the spelling or the chart text, or route it to a coder.")
+            with st.expander("Show the low-confidence best guesses anyway"):
+                st.caption(f"ICD-10-CM `{row.icd10cm_code}` {row.icd10cm_display} ({confs[ICD]:.2f}) · "
+                           f"SNOMED CT `{row.snomed_code}` {row.snomed_display} ({confs[SNOMED]:.2f})")
+                a, b = st.columns(2)
+                with a:
+                    code_card(row, ICD, review_below)
+                with b:
+                    code_card(row, SNOMED, review_below)
+        else:
+            a, b = st.columns(2)
+            with a:
+                code_card(row, ICD, review_below)
+            with b:
+                code_card(row, SNOMED, review_below)
 
 with tab2:
     st.markdown("Upload `chunk_id, clinical_entity[, chunk_text]` (problem schema) or the training schema. "
