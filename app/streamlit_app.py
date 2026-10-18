@@ -183,31 +183,59 @@ def code_card(row: pd.Series, s: str, review_below: float):
     y.metric("margin over runner-up", f"{margin:.2f}")
     if conf < review_below:
         st.warning("Low confidence: route to a coder for review.")
+    elif conf >= 0.9:
+        st.success("High confidence: auto-accept.")
+    else:
+        st.info("Medium confidence: accept, spot-check.")
     alts = []
     for part in str(row[f"{c}_top5"]).split(" | "):
         if part:
             code, *rest = part.split(":")
-            alts.append({"code": code, "description": ":".join(rest[:-1]), "score": float(rest[-1])})
-    st.dataframe(pd.DataFrame(alts), hide_index=True, width="stretch")
+            alts.append({"code": code, "description": ":".join(rest[:-1]), "probability": float(rest[-1])})
+    st.caption("Top-5 candidates (the final stacker's probabilities):")
+    st.dataframe(pd.DataFrame(alts), hide_index=True, width="stretch",
+                 column_config={"probability": st.column_config.ProgressColumn("probability", min_value=0.0,
+                                                                               max_value=1.0, format="%.3f")})
 
 
 # --------------------------------------------------------------------------- page
 st.title("TermMap: clinical term → ICD-10-CM + SNOMED CT")
+st.caption("Retrieval (TF-IDF, SapBERT, training memory, open ontologies) → LambdaRank → context cross-encoder → "
+           "local Qwen2.5-7B LoRA selector → stacker. Fully offline and deterministic.")
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("5-fold CV, no selector: ICD", "0.665")
+k2.metric("5-fold CV, no selector: SNOMED", "0.622")
+k3.metric("Fold 0, shipped (with selector): ICD", "0.716")
+k4.metric("Fold 0, shipped (with selector): SNOMED", "0.685")
 with st.sidebar:
     st.header("Engine")
-    engine_path = st.text_input("engine file", str(config.CACHE_DIR / "engine.joblib"))
+    engine_path = st.text_input("engine file", str(config.CACHE_DIR / "engine.joblib"),
+                                help="Trained engine: retrieval indexes, ranker, cross-encoders, training-term memory.")
     have_sel = DEFAULT_SELECTOR.exists()
-    use_sel = st.checkbox("LLM selector (local Qwen2.5-7B + LoRA, GPU)", value=have_sel, disabled=not have_sel)
-    adapter = st.text_input("selector adapter", str(DEFAULT_SELECTOR))
-    review_below = st.slider("route to review below confidence", 0.0, 1.0, 0.5, 0.05)
+    use_sel = st.checkbox("LLM selector (local Qwen2.5-7B + LoRA, GPU)", value=have_sel, disabled=not have_sel,
+                          help="On = shipped configuration. Off = no-LLM mode (ranker + cross-encoder + stacker), "
+                               "faster and lower accuracy.")
+    adapter = st.text_input("selector adapter", str(DEFAULT_SELECTOR), help="LoRA adapter directory (trained on folds 1–4).")
+    review_below = st.slider("route to review below confidence", 0.0, 1.0, 0.5, 0.05,
+                             help="Codes below this confidence are flagged for a human coder; used by the "
+                                  "'answered' columns of the evaluation too.")
     st.caption("Offline: no network calls at inference. The shipped configuration = engine + selector + exported stacker.")
+    with st.expander("How to read the output"):
+        st.markdown("- **confidence**: the stacker's probability for the chosen code; ≥ 0.9 is ~93–95% correct.\n"
+                    "- **margin**: gap to the runner-up; a small margin means a close sibling (specificity call).\n"
+                    "- **top-5**: the alternatives a coder would pick from on review.\n"
+                    "- Training terms seen verbatim are answered by the exact-term lookup (confidence 1.00).")
+
+CATEGORY = {"abbr": "Abbreviation collision", "ocr": "OCR / typo", "spec": "Specificity", "ctx": "Context decides",
+            "neg": "Negation", "side": "Laterality"}
 
 tab1, tab2, tab3 = st.tabs(["Map a term", "Batch + evaluate", "Blind test"])
 
 with tab1:
     demo_path = ROOT / "docs" / "demo" / "hard_cases.csv"
     presets = pd.read_csv(demo_path, dtype=str) if demo_path.exists() else pd.DataFrame(columns=["chunk_id", "clinical_entity", "chunk_text"])
-    labels = ["(type your own)"] + [f"{r.chunk_id}: {r.clinical_entity}" for r in presets.itertuples()]
+    labels = ["(type your own)"] + [f"{CATEGORY.get(r.chunk_id.split('-')[0], r.chunk_id)} · {r.chunk_id}: {r.clinical_entity}"
+                                    for r in presets.itertuples()]
     def _apply_preset():
         i = labels.index(st.session_state.preset)
         if i:
@@ -222,7 +250,12 @@ with tab1:
         eng = engine_for(engine_path, use_sel, adapter)
         items = pd.DataFrame({"chunk_id": ["live"], "clinical_entity": [entity], "entity": [entity], "chunk_text": [chunk]})
         pred, secs = run(eng, items)
-        st.caption(f"mapped in {1000 * secs:.0f} ms")
+        st.caption(f"mapped in {1000 * secs:.0f} ms" + (" · with LLM selector" if use_sel else " · no-LLM mode"))
+        if chunk.strip():
+            i = chunk.lower().find(entity.strip().lower())
+            shown = (chunk[:i] + f":orange-background[**{chunk[i:i + len(entity.strip())]}**]" + chunk[i + len(entity.strip()):]
+                     if i >= 0 else chunk)
+            st.markdown("**Context:** " + shown.replace("$", "\\$"))
         a, b = st.columns(2)
         with a:
             code_card(pred.iloc[0], ICD, review_below)
