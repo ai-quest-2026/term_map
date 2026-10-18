@@ -3,7 +3,7 @@
 TermMap maps an extracted clinical entity, together with its chunk context, to one ICD-10-CM code and one SNOMED CT concept. Every answer it gives is a code from the supplied dictionaries. It was built for the HiLabs TermMap challenge (problem statement: `TermMap A Clinical Term Mapping Engine…md`).
 
 - **Write-up (PDF):** [`docs/TermMap_writeup.pdf`](docs/TermMap_writeup.pdf), built from [`docs/writeup.md`](docs/writeup.md) by `bash scripts/make_report.sh`
-- **Demo video:** DEMO_VIDEO_LINK
+- **Demo video:** https://drive.google.com/drive/folders/1hagk1FLN8eXYRFQZMRXTeDwBiY8VIbJM
 - **Experiment log:** [`docs/experiments.md`](docs/experiments.md) · data findings: [`docs/analysis.md`](docs/analysis.md)
 
 ## Architecture
