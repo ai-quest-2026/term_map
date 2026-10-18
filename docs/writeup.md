@@ -45,7 +45,7 @@ entity + chunk_text
 icd10cm_code, snomed_code + calibrated confidence, margin and top-5 alternatives
 ```
 
-There is one deterministic command: `scripts/predict.py`. Seeds are fixed, LightGBM is deterministic, cross-encoder training uses deterministic GPU kernels, and nothing calls the network at inference. Retrieval and ranking take about 25–30 ms per term per system on CPU. End-to-end time of the shipped engine (with the 7B selector, A6000): TIMING_TBD. The selector is a local open-weight model: no data leaves the machine.
+There is one deterministic command: `scripts/predict.py`. Seeds are fixed, LightGBM is deterministic, cross-encoder training uses deterministic GPU kernels, and nothing calls the network at inference. Retrieval and ranking take about 25–30 ms per term per system on CPU. End-to-end, the shipped engine maps 500 terms in 214.5 s on one RTX A6000 (≈ 0.43 s per term for both codes, including loading the 7B model); without the selector the same 500 take 32.7 s (≈ 65 ms per term). Two runs give byte-identical output. The selector is a local open-weight model: no data leaves the machine.
 
 ## 3. Results (5-fold CV, all labelled diagnosis terms)
 

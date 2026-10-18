@@ -137,6 +137,19 @@ All 10 s3 blend gates PASS (blend ≥ ranker on every fold and system). The stac
 
 **Ship decision: v2.** Pooled headline 0.6215 ≥ the locked 0.604 (the rule only blocks ≥ 1 pt below). In fold 0 the leave-one-fold-out stacker without the selector gives 0.6674 / 0.6167, vs 0.6718 / 0.6056 for the in-fold cross-fit (G4).
 
+### Final engine (shipped)
+- `python -m scripts.predict --input reports/sample_input.csv --output /tmp/warm.csv --refit` fits the ranker + cross-encoders on all 5,005 rows (CE dev acc best epoch: ICD 0.648, SNOMED 0.695) and saves `data/cache/engine.joblib`; 500 terms in 32.7 s without the selector (`logs/final_refit.log`).
+- Stacker re-exported **with** the selector feature (`s5 --folds 0 --with-selector --export-stacker`, fitted on fold 0's 991 terms; `logs/v2_s5_export_sel.log`). This is the last export.
+- `python -m scripts.predict --input reports/sample_input.csv --output predictions.csv --details details.csv --selector data/cache/stages/v2/selector_f0`: **mapped 500 terms in 214.5 s** (second run 215.7 s), ≈ 0.43 s/term incl. loading Qwen2.5-7B. `cmp` of the two runs: **DETERMINISTIC**. No evaluation file other than the training file was present, so the input is `reports/sample_input.csv` (first 500 unique DiagnosisCode entity/chunk_text rows).
+
+### JEV side experiment (hosted, not shipped)
+`scripts/llm_sidecar.py --run v2 --fold 0 --n 100` (`logs/jev_f0.log`, `reports/stages/jev_sidecar_v2_f0.json`): TypeSafe Jev (jev-1.13.0) picks among the v2 ranker's cached top-15, first 100 fold-0 test terms per system, 5 similar training terms in the state. Sends chart text to a third-party API, so it stays a side experiment.
+
+```
+[ICD10CM] n=100 ranker=0.660 jev=0.600 jev_if_unsure=0.650 blend0.5=0.710 blend1.0=0.660 gold@15=0.900 jev-only-right=13 ranker-only-right=19 (5s, model jev-1.13.0)
+[SNOMEDCT_US] n=100 ranker=0.580 jev=0.610 jev_if_unsure=0.660 blend0.5=0.650 blend1.0=0.670 gold@15=0.850 jev-only-right=15 ranker-only-right=12 (5s, model jev-1.13.0)
+```
+
 ## Locked configuration
 Base SapBERT + lexical/word-vector retrieval + training memory → LambdaRank → cross-encoder blend (w=0.3, top-15), LLM off.
 CV5: ICD 0.658, SNOMED 0.604 (#8).

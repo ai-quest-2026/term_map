@@ -45,13 +45,13 @@ Everything built is cached in `data/cache/` (gitignored).
 | What | Command |
 |---|---|
 | Predict (single command) | `python -m scripts.predict --input eval.csv --output predictions.csv [--details details.csv] --selector data/cache/stages/v2/selector_f0` |
-| Retrain from scratch | add `--refit` (about 2 min on 4 CPUs) |
+| Retrain from scratch | add `--refit` (~20 min on one A6000, mostly cross-encoder training; run it once without `--selector` so CE training and the 7B model never share the GPU) |
 | Hold-out evaluation | `python -m scripts.evaluate` → prints metrics, writes `reports/val_predictions.csv` |
 | API | `uvicorn api.main:app --port 8000`, then open `/docs` |
 
 The input file can use the training schema (`entity, chunk_text`) or the problem schema (`chunk_id, clinical_entity[, chunk_text]`). The output columns are `chunk_id, clinical_entity, icd10cm_code, snomed_code`.
 
-The engine is deterministic: there's no sampling, the seeds are fixed, and folds come from a hash of the chunk text.
+The engine is deterministic: there's no sampling, the seeds are fixed, and folds come from a hash of the chunk text. Two runs of the shipped engine on 500 terms give byte-identical output. Speed (A6000): 500 terms in 214.5 s with the selector (≈ 0.43 s/term), 32.7 s without it.
 
 ### API endpoints
 - `POST /map` with `{"entity": "ms", "chunk_text": "…mitral valve area 1.2 cm2…"}` returns both codes, their confidence, and the top-5 candidates.
